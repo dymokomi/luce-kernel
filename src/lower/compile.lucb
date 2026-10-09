@@ -163,8 +163,17 @@ extend Lowerer:
                 if column.written[k]:
                     self.b.store(self.b.output(column.name, k, column.kind), column.value.lanes[k])
 
+    ## A register holding `value` in `kind` (a column's neutral value).
+    func missing_lane(kind: Kind, value: f64) -> u16:
+        return match kind:
+            .f32 => self.b.constant_f32((f32)value)
+            .f64 => self.b.constant_f64(value)
+            .i32 => self.b.constant_i32((i32)value)
+            .i64 => self.b.constant_i64((i64)value)
+            _ => self.b.constant(kind, 0)
+
     ## Each column's starting value: the input's lanes (lanes past its components read 0),
-    ## or 0 for a column the input lacks; registers of its own when written in a branch.
+    ## or 0 (or the host's `missing_reads` value) for a column the input lacks; registers of its own when written in a branch.
     func bind_columns(decl: ast.Node*) -> !:
         for at in 0..<self.columns.length():
             var use = self.columns.at(at)
@@ -180,5 +189,9 @@ extend Lowerer:
             if present:
                 for k in 0..<use.components:
                     value.lanes[k] = self.b.input(use.name, k, use.kind)
+            elif let given = self.host.missing_value(use.name):
+                # The host's neutral value for a column the input lacks.
+                for k in 0..<(use.components if use.components < 4 else 4):
+                    value.lanes[k] = self.missing_lane(use.kind, given[k])
             use.value = self.copied(value) if use.pinned else value
             self.columns.set(at, use)

@@ -50,12 +50,19 @@ pub struct InputColumn:
     pub let kind: Kind
     pub let components: usize
 
+## What a missing input column reads as, lane by lane, instead of 0 (`orient`: the
+## identity quaternion).
+pub struct MissingDefault:
+    pub let name: str
+    pub let values: f64[4]
+
 ## The host's API description. A zero value is empty; `destroy` gives back its storage.
 pub struct Host:
     var bindings: collections.List[Binding]
     var input_columns: collections.List[InputColumn]
     var known_columns: bool
     var missing_zero: bool
+    var missing_defaults: collections.List[MissingDefault]
     var libraries: collections.List[str]
     var texts: collections.TextPool
 
@@ -111,6 +118,18 @@ pub struct Host:
     pub func reads_missing_as_zero() -> bool:
         return self.missing_zero
 
+    ## A missing column `name` reads as `values` (one per component, the rest 0) instead
+    ## of 0: a field whose neutral value is not zero, like a rotation's identity.
+    pub func missing_reads(name: str, values: f64[4]) -> !:
+        try self.missing_defaults.append(MissingDefault(name = try self.texts.keep_text(name.bytes), values = values))
+
+    ## What missing column `name` reads as, when the host gave it a value.
+    pub func missing_value(name: str) -> f64[4]?:
+        for found in self.missing_defaults.view():
+            if found.name == name:
+                return found.values
+        return none
+
     ## Method `member` of `owner` gives an API value named by its integer argument.
     pub func handle(owner: str, member: str) -> !:
         try self.add(owner, member, .handle, "", 1, none)
@@ -140,6 +159,7 @@ pub struct Host:
         self.bindings.destroy()
         self.libraries.destroy()
         self.input_columns.destroy()
+        self.missing_defaults.destroy()
         self.texts.destroy()
         self.known_columns = false
         self.missing_zero = false
