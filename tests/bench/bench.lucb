@@ -1,0 +1,103 @@
+## The Code node's Stage 1 benchmarks, built by hand with the IR builder: 1M points with
+## interleaved f32 positions and normals. Prints one `name<TAB>threads<TAB>milliseconds`
+## line per case (the best of five runs); run.py builds it with --opt 3 and makes the
+## table.
+import memory
+import time
+from luce_std import math32
+from luce_kernel import engine
+from luce_kernel.engine import Builder, Column, Request, Uniform, Program
+
+let points: usize = 1000000
+
+## `p.P[1] += math32.sin(p.P[0] * 4.0) * 0.1`
+func wave() -> Program!:
+    var b = Builder()
+    let x = b.input("P", 0, .f32)
+    let y = b.input("P", 1, .f32)
+    let sine = b.unary(.sin, b.binary(.mul, x, b.constant_f32(4.0)))
+    b.store(b.output("P", 1, .f32), b.binary(.add, y, b.binary(.mul, sine, b.constant_f32(0.1))))
+    return try b.finish()
+
+## let n = snoise(p.P * scale + [0, 0, (f32)k.time, 0]); p.P = p.P + p.N * (n * amount)
+func displace() -> Program!:
+    var b = Builder()
+    let amount = b.uniform_f32("amount", 0.2)
+    let scale = b.uniform_f32("scale", 3.0)
+    let clock = b.uniform_f32("time", 0.0)
+    let point = b.vector(.f32, 3)
+    for k: u16 in 0..<3:
+        let scaled = b.binary(.mul, b.input("P", (usize)k, .f32), scale)
+        b.emit(.copy, .f32, point + k, b.binary(.add, scaled, clock) if k == 2 else scaled, 0, 0)
+    let n = b.snoise(point, 3)
+    let along = b.binary(.mul, n, amount)
+    for k: u16 in 0..<3:
+        let moved = b.binary(.add, b.input("P", (usize)k, .f32), b.binary(.mul, b.input("N", (usize)k, .f32), along))
+        b.store(b.output("P", (usize)k, .f32), moved)
+    return try b.finish()
+
+## p.Cd = rand3(p.ptnum)
+func colors() -> Program!:
+    var b = Builder()
+    let seed = b.cast(b.index(.i32), .i64)
+    for k: u16 in 0..<3:
+        b.store(b.output("Cd", (usize)k, .f32), b.rand(seed, .f32, k))
+    return try b.finish()
+
+## An empty point snippet that binds P and writes it back.
+func empty() -> Program!:
+    var b = Builder()
+    for k: usize in 0..<3:
+        b.store(b.output("P", k, .f32), b.input("P", k, .f32))
+    return try b.finish()
+
+func measure(name: str, program: const Program*, request: const Request*) -> !:
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        if let fault = try engine.run(program, request):
+            print(f"{name} faulted at {fault.lane}")
+            return
+        let spent = time.since(started)
+        if spent < best: best = spent
+    print(f"{name}\t{request.threads}\t{(f64)best / 1000000.0}")
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    let positions = try new f32[points * 3] --- in memory.heap
+    defer free(positions) in memory.heap
+    let normals = try new f32[points * 3] --- in memory.heap
+    defer free(normals) in memory.heap
+    let written = try new f32[points * 3] --- in memory.heap
+    defer free(written) in memory.heap
+    for at in 0..<points:
+        let x = (f32)(at % 1000) * 0.01
+        let z = (f32)(at // 1000) * 0.01
+        positions[at * 3] = x
+        positions[at * 3 + 1] = 0.0
+        positions[at * 3 + 2] = z
+        normals[at * 3] = 0.0
+        normals[at * 3 + 1] = 1.0
+        normals[at * 3 + 2] = 0.0
+    var wave_program = try wave()
+    defer wave_program.destroy()
+    var displace_program = try displace()
+    defer displace_program.destroy()
+    var color_program = try colors()
+    defer color_program.destroy()
+    var empty_program = try empty()
+    defer empty_program.destroy()
+    let inputs = [Column.input_f32("P", positions, 3), Column.input_f32("N", normals, 3)]
+    let outputs = [Column.output_f32("P", written, 3), Column.output_f32("Cd", written, 3)]
+    let uniforms = [Uniform.f32("amount", 0.2), Uniform.f32("scale", 3.0), Uniform.f32("time", 0.5)]
+    for threads in [(usize)1, 0]:
+        let request = Request(count = points, inputs = inputs, outputs = outputs, uniforms = uniforms, threads = threads)
+        try measure("wave", &wave_program, &request)
+        try measure("displace", &displace_program, &request)
+        try measure("rand3", &color_program, &request)
+        try measure("empty", &empty_program, &request)
+        # The whole cook adds the host's copy of the input positions to the output.
+        let started = time.now()
+        memory.copy(written, positions, points * 3)
+        print(f"copy P\t{threads}\t{(f64)time.since(started) / 1000000.0}")
+    return 0

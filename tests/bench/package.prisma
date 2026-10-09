@@ -1,0 +1,11 @@
+#prisma 4.0
+def package "luce_kernel_bench" {
+    str source = "."
+    def dependency "luce-kernel" {
+        str path = "../.."
+    }
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str path = "../../../luce-std"
+    }
+}

@@ -11,24 +11,28 @@ func load_input(w: Worker*, bound: const Bound*):
         4: gather32(w.lanes32(bound.register), words_of(bound.bytes), from_value, step)
         _: gather64(w.lanes64(bound.register), doubles_of(bound.bytes), from_value, step)
 
+# The loops below prove their whole stride once (the last index is within the column,
+# which `bind_columns` guaranteed) and then step a pointer, so no lane pays a check.
+
 func gather8(d: u8[], source: const u8[], from_value: usize, step: usize, as_mask: bool):
+    if d.length == 0 or from_value + (d.length - 1) * step >= source.length:
+        return
+    let base = &source[from_value]
     for i in 0..<d.length:
-        let value = source[from_value + i * step]
+        let value = base[i * step]
         d[i] = (u8)(value != 0) if as_mask else value
 
 func gather32(d: u32[], source: const u32[], from_value: usize, step: usize):
-    if step == 1:
-        let part = source[from_value..<from_value + d.length]
-        for i in 0..<d.length: d[i] = part[i]
+    if d.length == 0 or from_value + (d.length - 1) * step >= source.length:
         return
-    for i in 0..<d.length: d[i] = source[from_value + i * step]
+    let base = &source[from_value]
+    for i in 0..<d.length: d[i] = base[i * step]
 
 func gather64(d: u64[], source: const u64[], from_value: usize, step: usize):
-    if step == 1:
-        let part = source[from_value..<from_value + d.length]
-        for i in 0..<d.length: d[i] = part[i]
+    if d.length == 0 or from_value + (d.length - 1) * step >= source.length:
         return
-    for i in 0..<d.length: d[i] = source[from_value + i * step]
+    let base = &source[from_value]
+    for i in 0..<d.length: d[i] = base[i * step]
 
 ## Write register `a`'s active lanes into output slot `dst`.
 func store_lanes(w: Worker*, ins: Instruction, shared: const Shared*):
@@ -42,24 +46,34 @@ func store_lanes(w: Worker*, ins: Instruction, shared: const Shared*):
         _: scatter64(doubles_of(bound.bytes), w.lanes64(ins.a), from_value, step, on)
 
 func scatter8(d: u8[], a: const u8[], from_value: usize, step: usize, on: Active):
+    if a.length == 0 or from_value + (a.length - 1) * step >= d.length:
+        return
+    let base = &d[from_value]
+    if on.all:
+        for i in 0..<a.length: base[i * step] = a[i]
+        return
     for i in 0..<a.length:
-        if on.at(i): d[from_value + i * step] = a[i]
+        if on.exec[i] != 0: base[i * step] = a[i]
 
 func scatter32(d: u32[], a: const u32[], from_value: usize, step: usize, on: Active):
-    if step == 1 and on.all:
-        let part = d[from_value..<from_value + a.length]
-        for i in 0..<a.length: part[i] = a[i]
+    if a.length == 0 or from_value + (a.length - 1) * step >= d.length:
+        return
+    let base = &d[from_value]
+    if on.all:
+        for i in 0..<a.length: base[i * step] = a[i]
         return
     for i in 0..<a.length:
-        if on.at(i): d[from_value + i * step] = a[i]
+        if on.exec[i] != 0: base[i * step] = a[i]
 
 func scatter64(d: u64[], a: const u64[], from_value: usize, step: usize, on: Active):
-    if step == 1 and on.all:
-        let part = d[from_value..<from_value + a.length]
-        for i in 0..<a.length: part[i] = a[i]
+    if a.length == 0 or from_value + (a.length - 1) * step >= d.length:
+        return
+    let base = &d[from_value]
+    if on.all:
+        for i in 0..<a.length: base[i * step] = a[i]
         return
     for i in 0..<a.length:
-        if on.at(i): d[from_value + i * step] = a[i]
+        if on.exec[i] != 0: base[i * step] = a[i]
 
 ## A host column's bytes as 4-byte and 8-byte lanes (the host gave typed, aligned spans).
 func words_of(bytes: u8[]) -> u32[]:
