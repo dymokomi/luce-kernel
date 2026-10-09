@@ -17,6 +17,10 @@ struct Worker:
     var offsets: const usize[]
     var exec_lanes: u8[]
     var masked: bool
+    ## The run's lane mask for this chunk (`Request.active`), when it has one: every exec
+    ## mask is cut to it, and `exec_all` restores it.
+    var base: const u8[]
+    var has_base: bool
     var counters: u64[]
     var n: usize
     var first: usize
@@ -93,8 +97,21 @@ struct Worker:
     ## do not change it).
     func set_exec(register: u16):
         let source = self.masks(register)
-        for lane in 0..<source.length:
-            self.exec_lanes[lane] = source[lane]
+        if self.has_base and self.base.length >= source.length:
+            for lane in 0..<source.length:
+                self.exec_lanes[lane] = source[lane] & (u8)(self.base[lane] != 0)
+        else:
+            for lane in 0..<source.length:
+                self.exec_lanes[lane] = source[lane]
+        self.masked = true
+
+    ## Every lane the run lets run active again.
+    func reset_exec():
+        if not self.has_base or self.base.length < self.n:
+            self.masked = false
+            return
+        for lane in 0..<self.n:
+            self.exec_lanes[lane] = (u8)(self.base[lane] != 0)
         self.masked = true
 
     ## The lowest active lane (in the exec mask and, unless absent, in `register`), or the
@@ -163,7 +180,7 @@ func execute(w: Worker*, shared: const Shared*):
             .jump_if_none:
                 if not any_set(w.masks(ins.b)): next = (usize)ins.a
             .exec: w.set_exec(ins.a)
-            .exec_all: w.masked = false
+            .exec_all: w.reset_exec()
             .loop_start: w.counters[(usize)ins.a] = 0
             .loop_step:
                 w.counters[(usize)ins.a] += 1

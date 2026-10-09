@@ -171,7 +171,7 @@ extend Lowerer:
             var present = true
             if self.host.known_columns:
                 present = self.host.input_column(use.name) != none
-            if use.read and not present:
+            if use.read and not present and not self.host.reads_missing_as_zero():
                 var room: u8[300]
                 let text = strings.format(room, f"the input has no column `{use.name}`") else "a column the input lacks"
                 try self.fail(use.first_use else decl, text)

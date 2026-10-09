@@ -27,6 +27,7 @@ struct Shared:
     var outputs: Bound[]
     var faults: ChunkFault[]
     var lowest: @usize
+    let active: const u8[]
 
 ## The largest chunk a run takes.
 let most_lanes: usize = 1 << 20
@@ -38,6 +39,8 @@ let most_lanes: usize = 1 << 20
 pub func run(program: const Program*, request: const Request*) -> Fault?!:
     if not program.verified:
         error(bad_program, "the program has not been verified")
+    if request.active.length > 0 and request.active.length < request.count:
+        error(bad_binding, "the lane mask is shorter than the run")
     if request.chunk == 0 or request.chunk > most_lanes:
         error(bad_binding, "the chunk must be 1 to 1048576 lanes")
     try check_index_range(program, request.count)
@@ -68,7 +71,7 @@ pub func run(program: const Program*, request: const Request*) -> Fault?!:
         made += 1
     let faults = try new ChunkFault[chunks]
     defer free(faults)
-    var shared = Shared(program = program, count = request.count, chunk = chunk, loop_cap = request.loop_cap, workers = workers, inputs = inputs, outputs = outputs, faults = faults)
+    var shared = Shared(program = program, count = request.count, chunk = chunk, loop_cap = request.loop_cap, workers = workers, inputs = inputs, outputs = outputs, faults = faults, active = request.active)
     shared.lowest.store(request.count, .relaxed)
     try parallel.for_each(chunks, (void*)&shared, run_chunk, threads = request.threads)
     return lowest_fault(program, faults)
@@ -175,8 +178,13 @@ func run_chunk(context: void*, index: usize, number: usize) -> !:
     let w = &shared.workers[number]
     w.first = first
     w.n = shared.chunk if shared.count - first > shared.chunk else shared.count - first
-    w.masked = false
     w.failed = false
+    w.has_base = shared.active.length > 0
+    if w.has_base:
+        w.base = shared.active[first..<first + w.n]
+        if not any_set(w.base):
+            return
+    w.reset_exec()
     for at in 0..<shared.inputs.length:
         load_input(w, &shared.inputs[at])
     execute(w, shared)

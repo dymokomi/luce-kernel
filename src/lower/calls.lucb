@@ -157,6 +157,15 @@ extend Lowerer:
                 return try self.uniform_value(e, name, e.type_id, default)
             .builtin:
                 return try self.builtin_call(e, binding)
+            .computed:
+                let at = try self.column_index(e, binding.column)
+                let use = self.columns.at(at)
+                var value = use.value
+                value.borrowed = use.pinned
+                return value
+            .reader:
+                let name = try self.literal_name(e, binding.column)
+                return try self.uniform_value(e, name, e.type_id, none)
             _:
                 return try self.fail_value(e, "this member is not a method")
 

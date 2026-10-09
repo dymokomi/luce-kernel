@@ -221,3 +221,20 @@ test "host builtins: registry and calls":
     let inputs = [Column.input_f32("x", xs), Column.input_mask("flag", flags)]
     assert(try run_columns(&program, 5, inputs, [Column.output_f32("doubled", doubled), Column.output_i32("number", numbers)]) == none)
     assert(doubled == [2.0, 4.0, 6.0, 8.0, 10.0] and numbers == [0, -1, 2, -1, 4])
+
+test "a lane mask runs only its lanes, which keep their element numbers":
+    var b = Builder()
+    let x = b.input("x", 0, .i32)
+    let quotient = b.binary(.idiv, b.constant_i32(100), x)
+    b.store(b.output("q", 0, .i32), quotient)
+    b.exec_all()
+    b.store(b.output("n", 0, .i32), b.index(.i32))
+    var program = try b.finish()
+    defer program.destroy()
+    let xs: i32[6] = [1, 0, 2, 0, 5, 0]
+    let active: u8[6] = [1, 0, 1, 0, 1, 0]
+    var qs: i32[6] = [9, 9, 9, 9, 9, 9]
+    var ns: i32[6] = [-1, -1, -1, -1, -1, -1]
+    let request = Request(count = 6, inputs = [Column.input_i32("x", xs)], outputs = [Column.output_i32("q", qs), Column.output_i32("n", ns)], uniforms = no_uniforms(), threads = 2, chunk = 2, active = active)
+    assert(try run(&program, &request) == none)
+    assert(qs == [100, 9, 50, 9, 20, 9] and ns == [0, -1, 2, -1, 4, -1])

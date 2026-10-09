@@ -121,30 +121,47 @@ extend Lowerer:
             return self.scalar(.f64, self.b.constant_f64(value), true, decl.type_id)
         return self.scalar(.f32, self.b.constant_f32((f32)value), true, decl.type_id)
 
-    ## Uniform `name` of `type_id`, a vector's lanes named `name[k]`, with default bits.
+    ## Uniform `name` of `type_id`, a vector's lanes named `name[k]`, with the default a
+    ## literal (or, for a vector, an array literal of them) gives.
     func uniform_value(e: ast.Node*, name: str, type_id: u32, default: ast.Node*?) -> Value!:
         let (kind, width) = try self.shape_or_fail(e, type_id)
-        var bits: u64 = 0
+        var defaults: u64[16]
         if let given = default:
-            var negative = false
-            var literal_node = given
-            if given.kind == ast.Kind.unary and given.text == "-":
-                if let inner = given.left:
-                    negative = true
-                    literal_node = inner
-            if literal_node.kind != ast.Kind.literal:
-                return try self.fail_value(given, "a parameter's default must be a literal")
-            bits = self.literal_bits(literal_node, kind, negative) else return try self.fail_value(given, "a parameter's default must be a number")
+            if given.kind == ast.Kind.array_lit:
+                var cursor = given.body
+                var at: usize = 0
+                while let element = cursor:
+                    if at < 16: defaults[at] = try self.default_bits(element, kind)
+                    at += 1
+                    cursor = element.next
+            else:
+                let bits = try self.default_bits(given, kind)
+                for k in 0..<width: defaults[k] = bits
         var value = self.scalar(kind, 0, true, type_id)
         value.width = width
         for k in 0..<width:
             if width == 1:
-                value.lanes[k] = self.b.uniform(name, kind, bits)
+                value.lanes[k] = self.b.uniform(name, kind, defaults[0])
             else:
                 var room: u8[300]
                 let lane_name = strings.format(room, f"{name}[{k}]") else name
-                value.lanes[k] = self.b.uniform(try self.texts.keep_text(lane_name.bytes), kind, 0)
+                value.lanes[k] = self.b.uniform(try self.texts.keep_text(lane_name.bytes), kind, defaults[k])
         return value
+
+    ## The bits of a literal default (a negative number included) as `kind`.
+    func default_bits(given: ast.Node*, kind: Kind) -> u64!:
+        var negative = false
+        var literal_node = given
+        if given.kind == ast.Kind.unary and given.text == "-":
+            if let inner = given.left:
+                negative = true
+                literal_node = inner
+        if literal_node.kind != ast.Kind.literal:
+            try self.fail(given, "a parameter's default must be a literal")
+        if let bits = self.literal_bits(literal_node, kind, negative):
+            return bits
+        try self.fail(given, "a parameter's default must be a number")
+        return 0
 
     # mark: Indexing ==========================================================================
 

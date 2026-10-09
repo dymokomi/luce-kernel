@@ -18,6 +18,11 @@ pub enum Role:
     parameter
     ## A host builtin; the receiver is not passed.
     builtin
+    ## A method without arguments reading a column the host computes (`f.area()`).
+    computed
+    ## An accessor reading the uniform named by the prefix and its literal argument
+    ## (`k.detail_f32("height")`); not a spare parameter.
+    reader
 
 ## One member of the API and what it stands for.
 pub struct Binding:
@@ -47,6 +52,7 @@ pub struct Host:
     var bindings: collections.List[Binding]
     var input_columns: collections.List[InputColumn]
     var known_columns: bool
+    var missing_zero: bool
     var texts: collections.TextPool
 
     ## Field `member` of struct `owner` is component-wise column `column`.
@@ -80,6 +86,23 @@ pub struct Host:
     pub func builtin(owner: str, member: str, builtin: Builtin) -> !:
         try self.add(owner, member, .builtin, "", 1, builtin)
 
+    ## Method `member` of `owner`, called without arguments, reads column `column`.
+    pub func computed(owner: str, member: str, column: str, components: usize) -> !:
+        try self.add(owner, member, .computed, column, components, none)
+
+    ## Method `member` of `owner` reads uniform `prefix` + its literal first argument.
+    pub func reader(owner: str, member: str, prefix: str) -> !:
+        try self.add(owner, member, .reader, prefix, 1, none)
+
+    ## Reading a column the input lacks gives 0 (VEX's rule) instead of a diagnostic;
+    ## columns it has are still read in their stored kind.
+    pub func missing_reads_zero():
+        self.missing_zero = true
+
+    ## Whether missing columns read as 0.
+    pub func reads_missing_as_zero() -> bool:
+        return self.missing_zero
+
     ## The input has column `name`. Once any is declared, a snippet may read only declared
     ## columns, each in its stored kind; writing an undeclared one creates it.
     pub func column(name: str, kind: Kind, components: usize) -> !:
@@ -93,6 +116,7 @@ pub struct Host:
         self.input_columns.destroy()
         self.texts.destroy()
         self.known_columns = false
+        self.missing_zero = false
 
     ## The binding of `member` of `owner`.
     pub func find(owner: str, member: str) -> Binding?:

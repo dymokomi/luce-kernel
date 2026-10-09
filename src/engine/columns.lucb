@@ -104,6 +104,8 @@ pub struct Uniform:
 
 ## One run: `count` lanes, the columns and uniforms by name, and how to schedule it.
 ## `threads` 0 is one per processor; `chunk` is the lanes an instruction runs over at once.
+## `active`, when not empty, holds a byte per lane: lanes at 0 run nothing, store nothing
+## and never fault (a group restriction), and keep their element numbers.
 pub struct Request:
     pub let count: usize
     pub let inputs: const Column[]
@@ -112,6 +114,7 @@ pub struct Request:
     pub let threads: usize = 0
     pub let chunk: usize = 4096
     pub let loop_cap: u64 = 1000000
+    pub let active: const u8[]
 
 ## Why a run stopped: Base's traps, as the node reports them.
 pub enum FaultKind:
