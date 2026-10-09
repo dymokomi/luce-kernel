@@ -43,6 +43,11 @@ pub struct Call:
     var failed: usize
     var kind: FaultKind = FaultKind.host
 
+    ## The number of the worker running this call, below `workers_of(request)`; one
+    ## worker runs its calls one at a time, in order (for per-worker host queues).
+    pub func worker_number() -> usize:
+        return self.worker.number
+
     ## Literal text argument `index` of the call site (an attribute name), or "".
     pub func text(index: usize) -> str:
         if index >= self.site.text_count: return ""

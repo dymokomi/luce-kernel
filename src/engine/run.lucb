@@ -59,7 +59,7 @@ pub func run(program: const Program*, request: const Request*) -> Fault?!:
     let offsets = try new usize[program.kinds.length()]
     defer free(offsets)
     let file_size = layout(program, chunk, offsets)
-    let worker_count = parallel.workers(chunks, request.threads)
+    let worker_count = workers_of(request)
     let workers = try new Worker[worker_count] ---
     defer free(workers)
     var made: usize = 0
@@ -69,6 +69,7 @@ pub func run(program: const Program*, request: const Request*) -> Fault?!:
     for at in 0..<worker_count:
         workers[at] = try make_worker(program, file_size, offsets, chunk, values)
         workers[at].run_context = request.context
+        workers[at].number = at
         made += 1
     let faults = try new ChunkFault[chunks]
     defer free(faults)
@@ -76,6 +77,13 @@ pub func run(program: const Program*, request: const Request*) -> Fault?!:
     shared.lowest.store(request.count, .relaxed)
     try parallel.for_each(chunks, (void*)&shared, run_chunk, threads = request.threads)
     return lowest_fault(program, faults)
+
+## How many workers a run of `request` uses: every builtin call's `worker_number()` is
+## below it, so a host can keep one queue per worker and fill it without a lock.
+pub func workers_of(request: const Request*) -> usize:
+    if request.count == 0 or request.chunk == 0: return 1
+    let chunk = request.chunk if request.chunk < request.count else request.count
+    return parallel.workers((request.count + chunk - 1) // chunk, request.threads)
 
 ## Lay out one worker's register file: each register holds `chunk` lanes of its kind,
 ## starting on a 64-byte boundary. Returns the file's size.

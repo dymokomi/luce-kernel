@@ -31,6 +31,8 @@ struct Worker:
     ## The host's context for this run, and the kind of the last builtin's fault.
     var run_context: void*?
     var call_kind: FaultKind
+    ## This worker's number in the run, below `workers_of(request)`.
+    var number: usize
 
     ## The lanes the current exec mask leaves active.
     func on() -> Active:
