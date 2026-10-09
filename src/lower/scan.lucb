@@ -31,6 +31,15 @@ extend Lowerer:
         let module = self.module_name_of(decl) else return none
         return self.host.find(module, decl.text)
 
+    ## The declaration of the snippet's or a host helper module's function a call
+    ## inlines (none for `lib`, whose bodies read no columns, and for bindings).
+    func helper_of(call: ast.Node*) -> ast.Node*?:
+        let decl = call.resolved else return none
+        if decl.kind != ast.Kind.func_: return none
+        let module = self.module_name_of(decl) else return none
+        if module == self.c.modules.get(self.snippet).name or self.host.inlines(module): return decl
+        return none
+
     ## The module whose top level declares `decl`.
     func module_name_of(decl: ast.Node*) -> str?:
         for m in self.c.modules.span():
@@ -216,6 +225,13 @@ extend Lowerer:
                             try self.mark_written(at, every_lane, depth > 0)
                         try self.scan_expression_list(node.body, depth)
                         return
+                # A helper reading the element through a parameter (`fade(p)`) uses
+                # columns too: its body is walked once, its writes taken as masked.
+                if let helper = self.helper_of(node):
+                    if not contains(self.scanned_helpers.view(), helper):
+                        try self.scanned_helpers.append(helper)
+                        if let body = helper.body:
+                            try self.scan_list(body.body, true, depth + 1)
             _:
                 _ = 0
         try self.scan_expression(node.left, depth)

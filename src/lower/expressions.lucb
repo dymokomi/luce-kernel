@@ -79,6 +79,10 @@ extend Lowerer:
             _ = width
             return self.scalar(kind, self.b.index(kind), false, decl.type_id)
         if self.api_type(e.type_id) != none:
+            # The running element (`p`) or the kernel (`k`) passed on to a helper: the
+            # helper reads them through their members, so the name carries no value.
+            if decl.kind == ast.Kind.param:
+                return self.nothing()
             return try self.fail_value(e, "an API value is used through its members, not as a value")
         return try self.not_available(e, "this name")
 

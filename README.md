@@ -43,8 +43,10 @@ Three public modules:
   `write_root` lays out the modules the checker resolves imports against, and `compile`
   checks the module with luce-base's own checker (`embed.Library`) and lowers the typed
   tree. A `Host` says what its API members are (column fields, accessors by literal name,
-  the element number, uniforms and parameters, builtins). Element-dependent conditions
-  become exec masks, uniform ones jumps; helpers in the header are inlined. Every
+  the element number, uniforms and parameters, builtins) and which of its stub modules
+  are helper libraries, inlined like `lib` (`Host.library`). Element-dependent conditions
+  become exec masks, uniform ones jumps; helpers in the header are inlined, and may take
+  the element (`fade(p)`) and read and write it through its members. Every
   diagnostic and fault maps back to the user's line and column. For an editor,
   `complete` lists what may come at the caret (members after a dot, else locals, the
   header's helpers, lib functions, types and keywords, each with its signature and `##`

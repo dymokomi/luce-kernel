@@ -56,6 +56,7 @@ pub struct Host:
     var input_columns: collections.List[InputColumn]
     var known_columns: bool
     var missing_zero: bool
+    var libraries: collections.List[str]
     var texts: collections.TextPool
 
     ## Field `member` of struct `owner` is component-wise column `column`.
@@ -121,9 +122,23 @@ pub struct Host:
         try self.input_columns.append(InputColumn(name = kept, kind = kind, components = components))
         self.known_columns = true
 
+    ## Functions of host stub module `module` (`luce_geocore.gsplat`) are helpers built on
+    ## the API: a call lowers their Base bodies inline, as it does `lib`'s, unless a
+    ## binding names the function.
+    pub func library(module: str) -> !:
+        try self.libraries.append(try self.texts.keep_text(module.bytes))
+
+    ## Whether `module` is one of the host's helper modules.
+    pub func inlines(module: str) -> bool:
+        for known in self.libraries.view():
+            if known == module:
+                return true
+        return false
+
     ## Give back the storage.
     pub func destroy():
         self.bindings.destroy()
+        self.libraries.destroy()
         self.input_columns.destroy()
         self.texts.destroy()
         self.known_columns = false

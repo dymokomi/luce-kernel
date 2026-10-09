@@ -329,3 +329,23 @@ pub func run_all() -> !:
     try expect_diagnostic(root, &host, "func f(x: f32) -> f32:\n    return x +\n", "p.Cd[0] = f(1.0)\n", .header, 2, "")
     try expect_diagnostic(root, &host, "func f(x: i32) -> i32:\n    return f(x)\n", "p.Cd[0] = (f32)f(1)\n", .header, 2, "recursion")
     try expect_diagnostic(root, &host, no_header, "let unused_value = 1.0\np.Cd[0] = 1.0\n", .body, 1, "unused", severity = .warning)
+
+    # A header helper and a host helper module (Host.library) take the running point:
+    # their bodies read and write it through its fields.
+    try lower.write_text(root, "host/tools.lucb", tools)
+    try host.library("host.tools")
+    let with_tools = RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = "from host.code import Point, Kernel\nfrom host import tools")
+    var helped = try lower.compile(root, with_tools, "func paint(q: Point*, v: f32):\n    q.Cd = [v, q.P[0], 0.0, 0.0]\n", "tools.lift(p, tools.twice(0.25))\npaint(p, 3.0)\n", &host)
+    defer helped.destroy()
+    if not helped.ok():
+        for d in helped.diagnostics(): print(f"  {d.line}:{d.column}: {d.message}")
+        trap("lowering: the helper snippet did not compile")
+    assert(try columns.run(&helped, common.no_uniforms()) == none)
+    for at in 0..<points:
+        same("library helper", columns.moved[at * 3 + 1], columns.positions[at * 3 + 1] + 0.5, at)
+        same("header helper", columns.colors[at * 3], 3.0, at)
+        same("header helper reads", columns.colors[at * 3 + 1], columns.positions[at * 3], at)
+    print("ok    lowering helpers given the point: a header helper and a host library")
+
+## A host helper module: inlined like `lib` once the host names it (Host.library).
+let tools: str = "from host.code import Point\n\n## Twice `x`.\npub func twice(x: f32) -> f32:\n    return x * 2.0\n\n## Raise the point by `by`.\npub func lift(p: Point*, by: f32):\n    p.P = p.P + [0.0, by, 0.0, 0.0]\n"

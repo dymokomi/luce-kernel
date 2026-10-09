@@ -87,6 +87,8 @@ struct Lowerer:
     var library_depth: usize
     var library_call: ast.Node*?
     var varying_decls: collections.List[ast.Node*]
+    ## The helpers whose bodies the scan has walked for the columns they use.
+    var scanned_helpers: collections.List[ast.Node*]
     var pinned_decls: collections.List[ast.Node*]
     var texts: collections.TextPool
     var exec_now: u16 = 0xFFFF
@@ -109,6 +111,7 @@ struct Lowerer:
         self.inlining.destroy()
         self.receivers.destroy()
         self.varying_decls.destroy()
+        self.scanned_helpers.destroy()
         self.pinned_decls.destroy()
         self.texts.destroy()
 

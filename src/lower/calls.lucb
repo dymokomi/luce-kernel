@@ -19,6 +19,8 @@ extend Lowerer:
             if has_operation(decl.text) and decl.kind == ast.Kind.func_ and self.receiver_node(e, decl) == none:
                 return try self.lib_call(e, decl)
             return try self.inline(e, decl, true)
+        if self.host.inlines(module):
+            return try self.inline(e, decl, true)
         if module == "luce_std.math32" or module == "luce_std.math":
             return try self.math_call(e, decl)
         if module == self.c.modules.get(self.snippet).name and decl.kind == ast.Kind.func_:
@@ -42,7 +44,11 @@ extend Lowerer:
             if source == none:
                 try self.fail(e, "a missing argument")
             let node = source else return count
-            values[count] = try self.converted(try self.expression(node), parameter.type_id, node)
+            # An API value (`p`) is passed as it is: the helper reads its members.
+            if self.api_type(parameter.type_id) != none:
+                values[count] = try self.expression(node)
+            else:
+                values[count] = try self.converted(try self.expression(node), parameter.type_id, node)
             count += 1
             parameters = parameter.next
         return count
