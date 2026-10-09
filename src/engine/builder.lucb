@@ -45,6 +45,18 @@ pub struct Builder:
                 return no_register
         return (u16)first
 
+    ## Consecutive fresh registers of the given kinds (a record's lanes): the first.
+    pub func record(kinds: const Kind[]) -> u16:
+        if kinds.length == 0:
+            self.fail("a record of no lanes")
+            return no_register
+        let first = self.vector(kinds[0], kinds.length)
+        if self.failed:
+            return no_register
+        for (at, kind) in kinds.indexed():
+            self.program.kinds.set((usize)first + at, kind)
+        return first
+
     ## The kind of `register`, if it exists.
     pub func kind_of(register: u16) -> Kind?:
         return self.program.kind(register)
@@ -324,7 +336,11 @@ pub struct Builder:
     ## Call host builtin `builtin` on `arguments`: the first of its consecutive result
     ## registers.
     pub func call(builtin: Builtin, arguments: const u16[]) -> u16:
-        if arguments.length != builtin.argument_count or arguments.length > most_arguments or builtin.result_count == 0 or builtin.result_count > most_results:
+        return self.call_with_texts(builtin, arguments, no_texts())
+
+    ## `call` with literal text arguments (attribute names), which `Call.text` gives.
+    pub func call_with_texts(builtin: Builtin, arguments: const u16[], texts: const str[]) -> u16:
+        if arguments.length != builtin.argument_count or arguments.length > most_arguments or builtin.result_count == 0 or builtin.result_count > most_results or texts.length > most_texts:
             self.fail("a builtin called with the wrong number of arguments")
             return no_register
         let results = self.vector(builtin.results[0], builtin.result_count)
@@ -333,10 +349,13 @@ pub struct Builder:
         # The results may differ in kind: give each its own.
         for at in 1..<builtin.result_count:
             self.program.kinds.set((usize)results + at, builtin.results[at])
-        var registers: u16[8]
+        var registers: u16[32]
         for (at, register) in arguments.indexed():
             registers[at] = register
-        let site = Site(builtin = builtin, arguments = registers, results = results)
+        var kept: str[4] = ["", "", "", ""]
+        for (at, text) in texts.indexed():
+            kept[at] = self.keep(text)
+        let site = Site(builtin = builtin, arguments = registers, results = results, texts = kept, text_count = texts.length)
         let index = self.program.sites.length()
         self.program.sites.append(site) catch failure:
             self.fail("out of memory")
@@ -491,3 +510,8 @@ pub struct Builder:
             return
         self.failed = true
         self.failure = message
+
+## No literal texts.
+func no_texts() -> const str[]:
+    var none_given: const str[]
+    return none_given

@@ -200,7 +200,7 @@ func double_lanes(call: Call*):
 test "host builtins: registry and calls":
     var registry = Registry()
     defer registry.destroy()
-    let builtin = Builtin(name = "double", arguments = [.f32, .mask, .f32, .f32, .f32, .f32, .f32, .f32], argument_count = 2, results = [.f32, .i32, .f32, .f32], result_count = 2, run = double_lanes, context = none)
+    let builtin = Builtin.of("double", [Kind.f32, Kind.mask], [Kind.f32, Kind.i32], double_lanes)
     try registry.add(builtin)
     var refused = false
     registry.add(builtin) catch failure:

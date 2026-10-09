@@ -5,12 +5,12 @@ import strings
 from io import path
 from luce_std import math32
 from luce_kernel import engine, lib, lower
-from luce_kernel.engine import Builtin, Call, Column, Request, Uniform
+from luce_kernel.engine import Builtin, Call, Column, Request, Uniform, Kind
 from luce_kernel.lower import Host, RunOver, Compiled
 import common
 
 ## The test host's API stubs, as luce-geocore's `code` module will look.
-let stubs: str = "## Test API.\npub struct Point:\n    pub var P: f32[4]\n    pub var N: f32[4]\n    pub var Cd: f32[4]\n    pub let ptnum: i32\n    pub let numpt: i32\n\n    pub func f32(name: str) -> f32:\n        _ = name\n        return 0.0\n\n    pub func set_f32(name: str, value: f32):\n        _ = name\n        _ = value\n\n    pub func vec3(name: str) -> f32[4]:\n        _ = name\n        return f32[4](0.0)\n\n    pub func area() -> f32:\n        return 0.0\n\npub struct Kernel:\n    pub let time: f64\n\n    pub func f32(name: str, default: f32 = 0.0) -> f32:\n        _ = name\n        return default\n\n    pub func i32(name: str, default: i32 = 0) -> i32:\n        _ = name\n        return default\n"
+let stubs: str = "## Test API.\npub struct Point:\n    pub var P: f32[4]\n    pub var N: f32[4]\n    pub var Cd: f32[4]\n    pub let ptnum: i32\n    pub let numpt: i32\n\n    pub func f32(name: str) -> f32:\n        _ = name\n        return 0.0\n\n    pub func set_f32(name: str, value: f32):\n        _ = name\n        _ = value\n\n    pub func vec3(name: str) -> f32[4]:\n        _ = name\n        return f32[4](0.0)\n\n    pub func area() -> f32:\n        return 0.0\n\npub struct Hit:\n    pub let prim: i32\n    pub let uv: f32[2]\n    pub let position: f32[4]\n    pub let distance: f32\n\npub struct Source:\n    var unused: i32\n\n    pub func count() -> i32:\n        return 0\n\n    pub func value(i: i32, name: str) -> f32:\n        _ = i\n        _ = name\n        return 0.0\n\n    pub func probe(at: f32[4]) -> Hit:\n        _ = at\n        return Hit(prim = 0, uv = [0.0, 0.0], position = [0.0, 0.0, 0.0, 0.0], distance = 0.0)\n\npub struct Kernel:\n    pub let time: f64\n\n    pub func input(index: i64) -> const Source*:\n        _ = index\n        return (const Source*)(void*)0x1000\n\n    pub func f32(name: str, default: f32 = 0.0) -> f32:\n        _ = name\n        return default\n\n    pub func i32(name: str, default: i32 = 0) -> i32:\n        _ = name\n        return default\n"
 
 let points: usize = 64
 
@@ -20,6 +20,31 @@ func area_lanes(call: Call*):
     let results = call.f32_result(0)
     for lane in 0..<call.lanes:
         results[lane] = (f32)(call.first + lane) * 0.5
+
+pub func no_kinds() -> const Kind[]:
+    var none_given: const Kind[]
+    return none_given
+
+func source_count(call: Call*):
+    let inputs = call.i64_argument(0)
+    let counts = call.i32_result(0)
+    for lane in 0..<call.lanes: counts[lane] = 100 + (i32)inputs[lane]
+
+func source_value(call: Call*):
+    let inputs = call.i64_argument(0)
+    let indices = call.i32_argument(1)
+    let values = call.f32_result(0)
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        values[lane] = (f32)(indices[lane] * 10) + (f32)name.length + (f32)(inputs[lane] * 1000)
+
+func source_probe(call: Call*):
+    let inputs = call.i64_argument(0)
+    let y = call.f32_argument(2)
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = (i32)inputs[lane]
+        call.f32_result(2)[lane] = y[lane]
+        call.f32_result(7)[lane] = 1.5
 
 pub func make_host() -> Host!:
     var host = Host()
@@ -31,10 +56,15 @@ pub func make_host() -> Host!:
     try host.getter("Point", "f32", "", 1)
     try host.setter("Point", "set_f32", "", 1)
     try host.getter("Point", "vec3", "", 3)
-    try host.builtin("Point", "area", Builtin(name = "area", arguments = [.f32, .f32, .f32, .f32, .f32, .f32, .f32, .f32], argument_count = 0, results = [.f32, .f32, .f32, .f32], result_count = 1, run = area_lanes, context = none))
+    try host.builtin("Point", "area", Builtin.of("area", no_kinds(), [Kind.f32], area_lanes))
     try host.uniform("Kernel", "time", "time")
     try host.parameter("Kernel", "f32")
     try host.parameter("Kernel", "i32")
+    try host.handle("Kernel", "input")
+    try host.builtin("Source", "count", Builtin.of("count", [Kind.i64], [Kind.i32], source_count))
+    try host.builtin("Source", "value", Builtin.of("value", [Kind.i64, Kind.i32], [Kind.f32], source_value))
+    let hit: Kind[8] = [Kind.i32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    try host.builtin("Source", "probe", Builtin.of("probe", [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32], hit, source_probe))
     try host.column("P", .f32, 3)
     try host.column("N", .f32, 3)
     try host.column("mass", .f32, 1)
@@ -236,6 +266,16 @@ pub func run_all() -> !:
     for at in 0..<points:
         same("a setter in a branch", columns.weighed[at], -1.0 if at % 2 == 0 else columns.masses[at], at)
     print("ok    lowering a setter inside a branch")
+
+    var handles = try compiled_or_trap(root, &host, no_header, "let g = k.input(1)\nlet h = g.probe(p.P)\np.Cd = [(f32)g.count(), g.value(p.ptnum, \"ab\"), h.uv[1] + h.distance, (f32)h.prim]\np.set_f32(\"mass\", (f32)k.input(0).count())\n")
+    defer handles.destroy()
+    assert(try columns.run(&handles, common.no_uniforms()) == none)
+    for at in 0..<points:
+        same("an API value's builtin", columns.colors[at * 3], 101.0, at)
+        same("a text argument", columns.colors[at * 3 + 1], (f32)(at * 10 + 2 + 1000), at)
+        same("a record result", columns.colors[at * 3 + 2], columns.positions[at * 3 + 1] + 1.5, at)
+        same("an API value inline", columns.weighed[at], 100.0, at)
+    print("ok    lowering API values, text arguments and record results")
 
     var faulting = try compiled_or_trap(root, &host, no_header, "let x = p.P[0]\nlet q = 100 // (p.ptnum - 10)\np.Cd = [x, (f32)q, 0.0, 0.0]\n")
     defer faulting.destroy()

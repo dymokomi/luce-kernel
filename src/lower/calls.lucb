@@ -143,7 +143,7 @@ extend Lowerer:
                 let value_node = argument.left else return self.nothing()
                 let at = try self.column_index(e, name)
                 let value = try self.converted(try self.expression(value_node), self.columns.at(at).type_id, value_node)
-                try self.write_column(e, name, value, 16)
+                try self.write_column(e, name, value, every_lane)
                 return self.nothing()
             .parameter:
                 let name = try self.literal_name(e, "")
@@ -168,24 +168,52 @@ extend Lowerer:
             .reader:
                 let name = try self.literal_name(e, binding.column)
                 return try self.uniform_value(e, name, e.type_id, none)
+            .handle:
+                let argument = e.body else return try self.fail_value(e, "an API value needs its number")
+                let number_node = argument.left else return self.nothing()
+                let number = try self.expression(number_node)
+                if number.width != 1 or not number.kind.is_integer():
+                    return try self.fail_value(number_node, "an API value is named by an integer")
+                var value = self.scalar(.i64, self.b.cast(number.lanes[0], .i64) if number.kind != .i64 else number.lanes[0], number.uniform, e.type_id)
+                value.handle = true
+                return value
             _:
                 return try self.fail_value(e, "this member is not a method")
 
     ## A host builtin: the arguments' lanes in order, the results as the call's value.
     func builtin_call(e: ast.Node*, binding: Binding) -> Value!:
         let builtin = binding.builtin else return self.nothing()
-        var registers: u16[8]
+        var registers: u16[32]
         var count: usize = 0
         var uniform = true
+        var texts: str[4] = ["", "", "", ""]
+        var text_count: usize = 0
+        # A method of an API value takes the value first (`k.input(1).point_count()`).
+        if let callee = e.left:
+            if let owner = callee.left:
+                if not self.is_parameter(owner) and self.api_type(owner.type_id) != none:
+                    let handle = try self.expression(owner)
+                    if not handle.handle:
+                        return try self.fail_value(owner, "internal: an API value without its number")
+                    registers[0] = handle.lanes[0]
+                    count = 1
+                    uniform = handle.uniform
         var cursor = e.body
         while let argument = cursor:
             let node = argument.left else return self.nothing()
+            if node.type_id == types.str_id:
+                if text_count >= 4:
+                    return try self.fail_value(node, "at most four texts to one call")
+                texts[text_count] = try self.text_literal(node)
+                text_count += 1
+                cursor = argument.next
+                continue
             let value = try self.expression(node)
             uniform = uniform and value.uniform
             for k in 0..<value.width:
                 if count >= builtin.argument_count:
                     return try self.fail_value(e, "more argument lanes than the builtin takes")
-                if value.kind != builtin.arguments[count]:
+                if value.lane_kind(k) != builtin.arguments[count]:
                     return try self.fail_value(node, "an argument of another kind than the builtin takes")
                 registers[count] = value.lanes[k]
                 count += 1
@@ -194,9 +222,19 @@ extend Lowerer:
             return try self.fail_value(e, "fewer argument lanes than the builtin takes")
         self.position(e)
         self.sync()
-        let first = self.b.call(builtin, registers[..<count])
+        let first = self.b.call_with_texts(builtin, registers[..<count], texts[..<text_count])
         if e.type_id == types.unit_id:
             return self.nothing()
+        if let shape = self.record(e.type_id):
+            if shape.width != builtin.result_count:
+                return try self.fail_value(e, "a builtin whose results differ from the method's type")
+            var result = self.zero_record(shape, e.type_id)
+            result.uniform = false
+            for k in 0..<shape.width:
+                if shape.kinds[k] != builtin.results[k]:
+                    return try self.fail_value(e, "a builtin whose results differ from the method's type")
+                result.lanes[k] = first + (u16)k
+            return result
         let (kind, width) = try self.shape_or_fail(e, e.type_id)
         if width != builtin.result_count or kind != builtin.results[0]:
             return try self.fail_value(e, "a builtin whose results differ from the method's type")

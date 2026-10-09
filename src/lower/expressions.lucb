@@ -97,6 +97,9 @@ extend Lowerer:
                     return try self.uniform_value(e, binding.column, e.type_id, none)
                 _:
                     return try self.fail_value(e, "this member is a method; call it")
+        if let owner = e.left:
+            if self.record(owner.type_id) != none:
+                return try self.record_field(e, owner)
         let decl = e.resolved else return try self.not_available(e, "this member")
         if decl.kind == ast.Kind.constant:
             if let value = self.math_constant(decl):
@@ -104,6 +107,19 @@ extend Lowerer:
             let initial = decl.left else return try self.fail_value(e, "a constant without a value")
             return try self.converted(try self.expression(initial), decl.type_id, initial)
         return try self.not_available(e, "this member")
+
+    ## A field of a record value (`hit.prim`, `bounds.size`): its lanes of the record's.
+    func record_field(e: ast.Node*, owner: ast.Node*) -> Value!:
+        let whole = try self.expression(owner)
+        let found = self.field_of(owner.type_id, e.text) else return try self.not_available(e, "this field")
+        let (offset, kind, width, type_id) = found
+        if offset + width > whole.width:
+            return try self.fail_value(e, "internal: a field past its record")
+        var value = self.scalar(kind, whole.lanes[offset], whole.uniform, type_id)
+        value.width = width
+        value.borrowed = whole.borrowed
+        for k in 0..<width: value.lanes[k] = whole.lanes[offset + k]
+        return value
 
     ## `math.pi` and its siblings, built from bits where luce-std computes them.
     func math_constant(decl: ast.Node*) -> Value?:
@@ -123,15 +139,15 @@ extend Lowerer:
 
     ## Uniform `name` of `type_id`, a vector's lanes named `name[k]`, with the default a
     ## literal (or, for a vector, an array literal of them) gives.
-    func uniform_value(e: ast.Node*, name: str, type_id: u32, default: ast.Node*?, lanes: usize = 16) -> Value!:
+    func uniform_value(e: ast.Node*, name: str, type_id: u32, default: ast.Node*?, lanes: usize = 32) -> Value!:
         let (kind, width) = try self.shape_or_fail(e, type_id)
-        var defaults: u64[16]
+        var defaults: u64[32]
         if let given = default:
             if given.kind == ast.Kind.array_lit:
                 var cursor = given.body
                 var at: usize = 0
                 while let element = cursor:
-                    if at < 16: defaults[at] = try self.default_bits(element, kind)
+                    if at < 32: defaults[at] = try self.default_bits(element, kind)
                     at += 1
                     cursor = element.next
             else:
@@ -285,6 +301,10 @@ extend Lowerer:
     ## `value` as type `type_id`: the same registers when it already is, an integer widened
     ## (the conversion Base makes without a spelling).
     func converted(value: Value, type_id: u32, node: ast.Node*) -> Value!:
+        if value.mixed or value.handle:
+            if value.type_id != type_id and self.record(type_id) == none:
+                return try self.fail_value(node, "a value of another type than expected")
+            return value
         let (kind, width) = try self.shape_or_fail(node, type_id)
         if value.kind == kind and value.width == width:
             var same = value
@@ -347,7 +367,7 @@ extend Lowerer:
         let skip = self.b.label()
         self.skip_if_idle(skip)
         let value = try self.converted(try self.expression(node), type_id, node)
-        self.write_registers(held, value, 16, false)
+        self.write_registers(held, value, every_lane, false)
         self.pop_frame()
         self.join(skip)
 

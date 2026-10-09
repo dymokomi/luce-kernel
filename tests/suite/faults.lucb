@@ -144,7 +144,7 @@ pub func run_all() -> !:
     program.destroy()
 
     var host = start(19)
-    let builtin = Builtin(name = "positive", arguments = [.f32, .f32, .f32, .f32, .f32, .f32, .f32, .f32], argument_count = 1, results = [.f32, .f32, .f32, .f32], result_count = 1, run = fail_negative, context = none)
+    let builtin = Builtin.of("positive", [Kind.f32], [Kind.f32], fail_negative)
     program = try finish(&host, host.call(builtin, [host.input("x", 0, .f32)]))
     try expect("host", &program, Column.input_f32("x", negatives), .host, first_bad, 19, "builtin failed")
     program.destroy()

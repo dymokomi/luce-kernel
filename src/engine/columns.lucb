@@ -115,6 +115,8 @@ pub struct Request:
     pub let chunk: usize = 4096
     pub let loop_cap: u64 = 1000000
     pub let active: const u8[]
+    ## Given to every builtin call of the run (`Call.run_context`): the host's per-run state.
+    pub let context: void*?
 
 ## Why a run stopped: Base's traps, as the node reports them.
 pub enum FaultKind:
@@ -127,6 +129,7 @@ pub enum FaultKind:
     trap
     loop_cap
     host
+    limit
 
 extend FaultKind:
     ## The plain wording: "index out of bounds".
@@ -141,6 +144,7 @@ extend FaultKind:
             .trap => "trap"
             .loop_cap => "loop ran too many times"
             .host => "builtin failed"
+            .limit => "too many additions from one element"
 
 ## A run that stopped: the fault of the lowest failing lane, where the program came from
 ## there, and the message (the `check` or `trap` text, else the kind's wording). The

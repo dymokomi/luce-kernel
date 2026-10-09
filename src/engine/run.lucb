@@ -68,6 +68,7 @@ pub func run(program: const Program*, request: const Request*) -> Fault?!:
             release_worker(&workers[at])
     for at in 0..<worker_count:
         workers[at] = try make_worker(program, file_size, offsets, chunk, values)
+        workers[at].run_context = request.context
         made += 1
     let faults = try new ChunkFault[chunks]
     defer free(faults)

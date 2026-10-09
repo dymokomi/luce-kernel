@@ -23,6 +23,9 @@ pub enum Role:
     ## An accessor reading the uniform named by the prefix and its literal argument
     ## (`k.detail_f32("height")`); not a spare parameter.
     reader
+    ## A method giving an API value (`k.input(1)`): its integer argument names the value
+    ## and is passed first to that value's builtins.
+    handle
 
 ## One member of the API and what it stands for.
 pub struct Binding:
@@ -80,7 +83,7 @@ pub struct Host:
     ## argument, with its literal second argument (or the parameter's default) as default.
     ## A vector one has a uniform per lane up to `components` (`name[0]`, ...); lanes past
     ## them read 0 (a `vec3` returning `f32[4]` has 3).
-    pub func parameter(owner: str, member: str, components: usize = 16) -> !:
+    pub func parameter(owner: str, member: str, components: usize = 32) -> !:
         try self.add(owner, member, .parameter, "", components, none)
 
     ## Method `member` of struct `owner` (or function `member` of module `owner`) runs
@@ -106,6 +109,10 @@ pub struct Host:
     ## Whether missing columns read as 0.
     pub func reads_missing_as_zero() -> bool:
         return self.missing_zero
+
+    ## Method `member` of `owner` gives an API value named by its integer argument.
+    pub func handle(owner: str, member: str) -> !:
+        try self.add(owner, member, .handle, "", 1, none)
 
     ## The input has column `name`. Once any is declared, a snippet may read only declared
     ## columns, each in its stored kind; writing an undeclared one creates it.
@@ -146,7 +153,7 @@ pub struct Host:
     func add(owner: str, member: str, role: Role, column: str, components: usize, builtin: Builtin?) -> !:
         if self.find(owner, member) != none:
             error(bad_host, "a member bound twice")
-        if components == 0 or components > 16:
-            error(bad_host, "a column has 1 to 16 components")
+        if components == 0 or components > 32:
+            error(bad_host, "a column has 1 to 32 components")
         let binding = Binding(owner = try self.texts.keep_text(owner.bytes), member = try self.texts.keep_text(member.bytes), role = role, column = try self.texts.keep_text(column.bytes), components = components, builtin = builtin)
         try self.bindings.append(binding)

@@ -28,6 +28,21 @@ extend Lowerer:
             _: try self.fail(s, "this statement is not available in a kernel")
 
     func declaration(s: ast.Node*) -> !:
+        # An API value (`let g = k.input(1)`) or a record (`let hit = g.intersect(...)`)
+        # holds what its initializer gives.
+        if self.api_type(s.type_id) != none or self.record(s.type_id) != none:
+            var value: Value
+            if let initial = s.left:
+                value = try self.expression(initial)
+            elif let shape = self.record(s.type_id):
+                value = self.zero_record(shape, s.type_id)
+            else:
+                return try self.fail(s, "an API value needs a value")
+            if value.handle:
+                try self.locals.append(Local(decl = s, value = value, pinned = false, uniform = value.uniform))
+                return
+            try self.declare(s, value)
+            return
         let (kind, width) = try self.shape_or_fail(s, s.type_id)
         var value = self.zero(kind, width, s.type_id)
         if let initial = s.left:
@@ -57,7 +72,7 @@ extend Lowerer:
                 let binding = self.binding_of(place.left, place.text) else return try self.fail(place, "this member cannot be assigned in a kernel")
                 if binding.role != .field:
                     return try self.fail(place, "this member cannot be assigned")
-                try self.write_column(place, binding.column, value, 16)
+                try self.write_column(place, binding.column, value, every_lane)
             .index:
                 let owner = place.left else return
                 let index = place.body else return
@@ -115,7 +130,7 @@ extend Lowerer:
         if use.pinned:
             self.write_registers(use.value, value, lane, false)
             return
-        if lane < 16:
+        if lane < every_lane:
             use.value.lanes[lane] = value.lanes[0]
         else:
             use.value.lanes = (self.copied(value) if value.borrowed else value).lanes
@@ -319,7 +334,7 @@ extend Lowerer:
         let function = self.functions.at(at)
         if let value_node = s.left:
             let value = try self.converted(try self.expression(value_node), function.result.type_id, value_node)
-            self.write_registers(function.result, value, 16, false)
+            self.write_registers(function.result, value, every_lane, false)
         if function.live != no_register:
             self.sync()
             self.b.assign(function.live, self.b.constant_mask(false))

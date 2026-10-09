@@ -88,7 +88,8 @@ func bytes_of(bytes: u8[]) -> u8[]:
 ## Call a builtin over the chunk; the lowest lane it failed, or the lane count.
 func call_lanes(w: Worker*, ins: Instruction, program: const Program*) -> usize:
     let site = &program.sites.view()[(usize)ins.dst]
-    var call = Call(lanes = w.n, first = w.first, context = site.builtin.context, worker = w, site = site, failed = w.n)
+    var call = Call(lanes = w.n, first = w.first, context = site.builtin.context, run_context = w.run_context, worker = w, site = site, failed = w.n)
     let entry = site.builtin.run
     entry(&call)
+    w.call_kind = call.kind
     return call.failed

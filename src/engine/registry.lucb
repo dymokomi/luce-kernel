@@ -2,30 +2,51 @@
 # engine's own. A builtin is a Base function over the chunk's columns, called once per
 # chunk with typed views of its argument and result registers.
 
-## The most arguments and results a builtin takes.
-pub let most_arguments: usize = 8
-pub let most_results: usize = 4
+## The most argument and result lanes a builtin takes, and the most literal texts.
+pub let most_arguments: usize = 32
+pub let most_results: usize = 32
+pub let most_texts: usize = 4
 
-## A host operation: its name, the kinds of its arguments and results, and the function
-## that computes a chunk of lanes. `run` writes every result lane and may call
+## A host operation: its name, the kinds of its argument and result lanes (a vector
+## argument is a lane per component; a record result a lane per field component), and the
+## function that computes a chunk of lanes. `run` writes every result lane and may call
 ## `Call.fail(lane)` for a lane that cannot be computed, which fails the run there.
+## Literal text arguments (attribute names) are not lanes: `Call.text` gives them.
 pub struct Builtin:
     pub let name: str
-    pub let arguments: Kind[8]
+    pub let arguments: Kind[32]
     pub let argument_count: usize
-    pub let results: Kind[4]
+    pub let results: Kind[32]
     pub let result_count: usize
     pub let run: func(Call*) -> unit
     pub let context: void*?
+
+    ## A builtin taking `arguments` and giving `results` (each at most 32 lanes).
+    pub static func of(name: str, arguments: const Kind[], results: const Kind[], work: func(Call*) -> unit, context: void*? = none) -> Builtin:
+        var taken: Kind[32]
+        var given: Kind[32]
+        let argument_count = arguments.length if arguments.length < 32 else 32
+        let result_count = results.length if results.length < 32 else 32
+        for at in 0..<argument_count: taken[at] = arguments[at]
+        for at in 0..<result_count: given[at] = results[at]
+        return Builtin(name = name, arguments = taken, argument_count = argument_count, results = given, result_count = result_count, run = work, context = context)
 
 ## One call of a builtin over a chunk: lane `i` is element `first + i`.
 pub struct Call:
     pub let lanes: usize
     pub let first: usize
+    ## The builtin's own context, and the run's (`Request.context`).
     pub let context: void*?
+    pub let run_context: void*?
     let worker: Worker*
     let site: const Site*
     var failed: usize
+    var kind: FaultKind = FaultKind.host
+
+    ## Literal text argument `index` of the call site (an attribute name), or "".
+    pub func text(index: usize) -> str:
+        if index >= self.site.text_count: return ""
+        return self.site.texts[index]
 
     ## Whether lane `lane` is active (only active lanes may fail).
     pub func active(lane: usize) -> bool:
@@ -33,8 +54,13 @@ pub struct Call:
 
     ## Fail the run at `lane` when it is active and below any lane failed before.
     pub func fail(lane: usize):
+        self.fail_as(lane, .host)
+
+    ## Fail at `lane` with fault `kind` (`bounds` for an index out of range).
+    pub func fail_as(lane: usize, kind: FaultKind):
         if self.active(lane) and lane < self.failed:
             self.failed = lane
+            self.kind = kind
 
     ## Argument `index` as f32 lanes (empty when it is not an f32 argument).
     pub func f32_argument(index: usize) -> const f32[]:

@@ -53,8 +53,10 @@ pub struct Binding:
 ## consecutive result registers.
 struct Site:
     let builtin: Builtin
-    let arguments: u16[8]
+    let arguments: u16[32]
     let results: u16
+    let texts: str[4]
+    let text_count: usize
 
 ## A verified program, ready to run any number of times on any number of threads at once.
 ## It owns its storage: `destroy` gives it back.

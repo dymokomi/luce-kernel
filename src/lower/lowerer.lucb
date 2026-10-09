@@ -6,13 +6,27 @@
 struct Value:
     var kind: Kind
     var width: usize
-    var lanes: u16[16]
+    var lanes: u16[32]
+    ## A record's lanes differ in kind (`kinds`); everything else is `kind` throughout.
+    var kinds: Kind[32]
+    var mixed: bool
+    ## An API value (`k.input(1)`): the lane holds what names it, passed to its methods.
+    var handle: bool
     ## Every element has the same value (built from constants and uniforms only).
     var uniform: bool
     ## The registers belong to a variable that may still change: a copy keeps the value.
     var borrowed: bool
     ## The Base type.
     var type_id: u32
+
+    ## The kind of lane `k`.
+    func lane_kind(k: usize) -> Kind:
+        return self.kinds[k] if self.mixed else self.kind
+
+## A record type's lanes and their kinds.
+struct Record:
+    var width: usize
+    var kinds: Kind[32]
 
 ## A local variable or `let`: its declaration and the registers holding it.
 struct Local:
@@ -33,7 +47,7 @@ struct ColumnUse:
     var components: usize
     var type_id: u32
     var read: bool
-    var written: bool[16]
+    var written: bool[32]
     var pinned: bool
     var value: Value
     ## Where the snippet first names it, for diagnostics.
@@ -118,7 +132,10 @@ struct Lowerer:
         return self.snippet
 
     func nothing() -> Value:
-        return Value(kind = .f32, width = 0, lanes = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], uniform = true, borrowed = false, type_id = types.none_id)
+        var value: Value
+        value.uniform = true
+        value.type_id = types.none_id
+        return value
 
     # mark: Types =============================================================================
 
@@ -130,10 +147,63 @@ struct Lowerer:
         if type_id <= types.f16_id:
             return none
         let t = self.c.table.get(type_id)
-        if t.kind != types.Kind.array or t.length == 0 or t.length > 16:
+        if t.kind != types.Kind.array or t.length == 0 or t.length > 32:
             return none
         let element = scalar_kind(t.elem) else return none
         return (element, (usize)t.length)
+
+    ## A record's lanes: each field's lanes in declaration order (a scalar, a vector or a
+    ## small array each), at most 32 in all; none for any other type.
+    func record(type_id: u32) -> Record?:
+        if type_id <= types.f16_id:
+            return none
+        let t = self.c.table.get(type_id)
+        if t.kind != types.Kind.struct_:
+            return none
+        let decl = t.decl else return none
+        var found: Record
+        var cursor = decl.body
+        while let member = cursor:
+            cursor = member.next
+            if member.kind != ast.Kind.field:
+                continue
+            let shaped = self.shape(member.type_id) else return none
+            let (kind, width) = shaped
+            if found.width + width > 32:
+                return none
+            for k in 0..<width: found.kinds[found.width + k] = kind
+            found.width += width
+        if found.width == 0:
+            return none
+        return found
+
+    ## Field `name` of record type `type_id`: its first lane, kind and lane count.
+    func field_of(type_id: u32, name: str) -> (usize, Kind, usize, u32)?:
+        let decl = self.c.table.get(type_id).decl else return none
+        var offset: usize = 0
+        var cursor = decl.body
+        while let member = cursor:
+            cursor = member.next
+            if member.kind != ast.Kind.field:
+                continue
+            let shaped = self.shape(member.type_id) else return none
+            let (kind, width) = shaped
+            if member.text == name:
+                return (offset, kind, width, member.type_id)
+            offset += width
+        return none
+
+    ## A record of `type_id` whose every lane is 0 of its kind.
+    func zero_record(shape: Record, type_id: u32) -> Value:
+        var value = self.nothing()
+        value.width = shape.width
+        value.mixed = true
+        value.type_id = type_id
+        value.kind = shape.kinds[0]
+        for k in 0..<shape.width:
+            value.kinds[k] = shape.kinds[k]
+            value.lanes[k] = self.b.constant(shape.kinds[k], 0)
+        return value
 
     ## The shape of `type_id`, or a refusal at `node`.
     func shape_or_fail(node: ast.Node*, type_id: u32) -> (Kind, usize)!:
@@ -172,10 +242,11 @@ struct Lowerer:
     ## them), written on every lane.
     func copied(value: Value) -> Value:
         var copy = value
-        let first = self.b.vector(value.kind, value.width)
+        let first = self.b.record(value.kinds[..<value.width]) if value.mixed else self.b.vector(value.kind, value.width)
         for k in 0..<value.width:
+            let kind = value.lane_kind(k)
             copy.lanes[k] = first + (u16)k
-            self.b.emit(.copy, value.kind, first + (u16)k, value.lanes[k], 0, 0)
+            self.b.emit(.copy, kind, first + (u16)k, value.lanes[k], 0, 0)
         copy.borrowed = false
         return copy
 
@@ -271,10 +342,10 @@ struct Lowerer:
 
     ## Write `value` (already of the local's shape) into local `at`, lane `lane` only when
     ## `lane` is below 16.
-    func write_local(at: usize, value: Value, lane: usize = 16):
+    func write_local(at: usize, value: Value, lane: usize = every_lane):
         var local = self.locals.at(at)
         if not local.pinned:
-            if lane < 16:
+            if lane < every_lane:
                 local.value.lanes[lane] = value.lanes[0]
             else:
                 local.value.lanes = (self.copied(value) if value.borrowed else value).lanes
@@ -287,13 +358,17 @@ struct Lowerer:
     func write_registers(target: Value, value: Value, lane: usize, uniform: bool):
         if not uniform: self.sync()
         for k in 0..<target.width:
-            if lane < 16 and k != lane:
+            if lane < every_lane and k != lane:
                 continue
-            let source = value.lanes[0] if lane < 16 else value.lanes[k]
+            let source = value.lanes[0] if lane < every_lane else value.lanes[k]
             if uniform:
-                self.b.emit(.copy, target.kind, target.lanes[k], source, 0, 0)
+                self.b.emit(.copy, target.lane_kind(k), target.lanes[k], source, 0, 0)
             else:
                 self.b.assign(target.lanes[k], source)
+
+## A lane number standing for every lane, and for a lane known only at run time.
+let every_lane: usize = 64
+let some_lane: usize = 65
 
 ## Whether `list` holds `node`.
 func contains(list: const (ast.Node*)[], node: ast.Node*) -> bool:

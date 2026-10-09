@@ -28,6 +28,9 @@ struct Worker:
     var fault_lane: usize
     var fault_instruction: usize
     var fault_kind: FaultKind
+    ## The host's context for this run, and the kind of the last builtin's fault.
+    var run_context: void*?
+    var call_kind: FaultKind
 
     ## The lanes the current exec mask leaves active.
     func on() -> Active:
@@ -214,7 +217,7 @@ func fault_kind_of(w: Worker*, ins: Instruction, lane: usize) -> FaultKind:
         .check => FaultKind.assertion
         .trap => FaultKind.trap
         .loop_step => FaultKind.loop_cap
-        .call => FaultKind.host
+        .call => w.call_kind
         _ => FaultKind.overflow
 
 ## Whether integer register `register` of `kind` is 0 at `lane`.

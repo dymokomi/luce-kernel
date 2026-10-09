@@ -60,6 +60,9 @@ extend Lowerer:
                 if let binding = self.call_binding(node):
                     if binding.role == .parameter or binding.role == .uniform or binding.role == .reader:
                         return false
+                    if binding.role == .handle:
+                        return self.varies_list(node.body)
+                        return false
                     if binding.role != .builtin:
                         return true
                     return true
@@ -76,6 +79,14 @@ extend Lowerer:
                 return true
             cursor = node.next
         return false
+
+    ## Whether `node` names a parameter of the function being lowered (an API pointer
+    ## parameter such as `p` or `k`, rather than an API value an expression gives).
+    func is_parameter(node: ast.Node*) -> bool:
+        if node.kind != ast.Kind.name:
+            return false
+        let decl = node.resolved else return false
+        return decl.kind == ast.Kind.param
 
     ## Whether a parameter of the entry is the element's number (`n: i64` of Numbers).
     func is_element_number(decl: ast.Node*) -> bool:
@@ -125,7 +136,7 @@ extend Lowerer:
                     try self.mark_varying(s)
             .assign:
                 try self.scan_expression(s.right, depth)
-                try self.scan_place(s.left, context or self.varies(s.right), depth, 16)
+                try self.scan_place(s.left, context or self.varies(s.right), depth, every_lane)
             .if_:
                 try self.scan_expression(s.left, depth)
                 let inner = context or self.varies(s.left)
@@ -185,7 +196,7 @@ extend Lowerer:
                         if binding.role == .getter:
                             self.mark_read(at)
                         else:
-                            try self.mark_written(at, 16, depth > 0)
+                            try self.mark_written(at, every_lane, depth > 0)
                         try self.scan_expression_list(node.body, depth)
                         return
             _:
@@ -208,20 +219,20 @@ extend Lowerer:
             .name:
                 let decl = node.resolved else return
                 if varying: try self.mark_varying(decl)
-                if depth > 0 or lane == 17: try self.mark_pinned(decl)
+                if depth > 0 or lane == some_lane: try self.mark_pinned(decl)
             .index:
                 try self.scan_expression(node.body, depth)
-                var which: usize = 17
+                var which: usize = some_lane
                 if let index = node.body:
                     if let constant = self.c.exact_integer(index, 64, true):
-                        if constant >= 0 and constant < 16: which = (usize)constant
+                        if constant >= 0 and constant < 32: which = (usize)constant
                 try self.scan_place(node.left, varying or self.varies(node.body), depth, which)
             .member:
                 let binding = self.binding_of(node.left, node.text) else return
                 if binding.role != .field:
                     return
                 let at = try self.column_use(node, binding.column, binding.components, node.type_id)
-                try self.mark_written(at, lane, depth > 0 or lane == 17)
+                try self.mark_written(at, lane, depth > 0 or lane == some_lane)
             _:
                 return
 
@@ -255,7 +266,7 @@ extend Lowerer:
     func mark_written(at: usize, lane: usize, pinned: bool) -> !:
         var use = self.columns.at(at)
         for k in 0..<use.width:
-            if (lane >= 16 or k == lane) and k < use.components:
+            if (lane >= every_lane or k == lane) and k < use.components:
                 use.written[k] = true
         use.pinned = use.pinned or pinned
         self.columns.set(at, use)

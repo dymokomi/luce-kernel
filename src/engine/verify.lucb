@@ -6,11 +6,11 @@
 
 ## The registers one instruction reads or writes.
 struct Registers:
-    var list: u16[24]
+    var list: u16[48]
     var count: usize
 
     func add(register: u16):
-        if self.count < 24:
+        if self.count < 48:
             self.list[self.count] = register
             self.count += 1
 
