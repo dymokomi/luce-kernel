@@ -1,0 +1,115 @@
+# Random draws and sampling: VEX's `nrandom`, `random_sobol` and `random_poisson`, and the
+# `sample_*` functions that warp uniform numbers in `[0, 1)` (from `rand`) onto shapes and
+# distributions.
+
+## A random number in `[0, 1)` for `seed` (VEX `nrandom`; departure: a pure function of
+## its seed, like `rand`, so cooks repeat; its own stream, apart from `rand`'s).
+pub func nrandom(seed: i64) -> f32:
+    return rand_stream(seed, 7)
+
+## Point `index` of a 3D Sobol sequence, each lane in `[0, 1)` (VEX `random_sobol`):
+## low-discrepancy points that fill space more evenly than `rand`. `seed` scrambles the
+## sequence by an XOR of its bits, so different seeds give different, equally even sets.
+pub func random_sobol(seed: i64, index: i64) -> f32[4]:
+    let n = (u64)index
+    var x: u32 = 0
+    var y: u32 = 0
+    var z: u32 = 0
+    # Direction numbers: the first dimension is van der Corput's; the second and third
+    # use the primitive polynomials x + 1 and x^2 + x + 1 (Joe and Kuo's m = 1; m = 1, 3).
+    var v1: u32 = 0x80000000
+    var v2: u32 = 0x80000000
+    var v2_before: u32 = 0
+    for bit: u32 in 0..<32:
+        if bit > 0:
+            v1 = v1 ^ (v1 >> 1)
+        if bit == 1:
+            v2_before = v2
+            v2 = 0xC0000000
+        elif bit > 1:
+            let next = v2 ^ v2_before ^ (v2_before >> 2)
+            v2_before = v2
+            v2 = next
+        if ((n >> (u64)bit) & 1) != 0:
+            x = x ^ ((u32)0x80000000 >> bit)
+            y = y ^ v1
+            z = z ^ v2
+    let scramble = random_bits(seed, 31)
+    x = x ^ (u32)(scramble >> 32)
+    y = y ^ (u32)scramble
+    z = z ^ (u32)(scramble >> 16)
+    return [(f32)(x >> 8) * (1.0 / 16777216.0), (f32)(y >> 8) * (1.0 / 16777216.0), (f32)(z >> 8) * (1.0 / 16777216.0), 0.0]
+
+## A Poisson-distributed count with mean `mean` for `seed` (VEX `random_poisson`):
+## Knuth's product of uniforms below a mean of 30, the rounded normal approximation above.
+pub func random_poisson(seed: i64, mean: f32) -> i32:
+    if not (mean > 0.0):
+        return 0
+    if mean >= 30.0:
+        let drawn = mean + math32.sqrt(mean) * sample_normal(rand_stream(seed, 41))
+        return (i32)math32.max(math32.floor(drawn + 0.5), 0.0)
+    let threshold = math32.exp(-mean)
+    var chance: f32 = 1.0
+    var count: i32 = -1
+    var stream: u32 = 0
+    while chance > threshold and stream < 200:
+        chance *= (f32)(random_bits(seed, 42 + stream) >> 40) * (1.0 / 16777216.0)
+        count += 1
+        stream += 1
+    return count
+
+## A point uniformly inside the unit disk from two uniform numbers (VEX
+## `sample_circle_uniform`).
+pub func sample_circle_uniform(u: f32[2]) -> f32[2]:
+    let r = math32.sqrt(u[0])
+    let angle = 2.0 * math32.pi * u[1]
+    return [r * math32.cos(angle), r * math32.sin(angle)]
+
+## A direction uniformly over the unit sphere from two uniform numbers (VEX
+## `sample_direction_uniform`).
+pub func sample_direction_uniform(u: f32[2]) -> f32[4]:
+    let z = 1.0 - 2.0 * u[0]
+    let r = math32.sqrt(math32.max(1.0 - z * z, 0.0))
+    let angle = 2.0 * math32.pi * u[1]
+    return [r * math32.cos(angle), r * math32.sin(angle), z, 0.0]
+
+## A point uniformly inside the unit ball from three uniform numbers (VEX
+## `sample_sphere_uniform`).
+pub func sample_sphere_uniform(u: f32[4]) -> f32[4]:
+    return sample_direction_uniform([u[1], u[2]]) * math32.cbrt(u[0])
+
+## A direction uniformly over the hemisphere around +Z from two uniform numbers (VEX
+## `sample_hemisphere(u)`).
+pub func sample_hemisphere(u: f32[2]) -> f32[4]:
+    let z = u[0]
+    let r = math32.sqrt(math32.max(1.0 - z * z, 0.0))
+    let angle = 2.0 * math32.pi * u[1]
+    return [r * math32.cos(angle), r * math32.sin(angle), z, 0.0]
+
+## A direction uniformly within `max_angle` radians of `center` (any length but zero)
+## from two uniform numbers (VEX `sample_direction_cone(center, maxangle, u)`).
+pub func sample_direction_cone(center: f32[4], max_angle: f32, u: f32[2]) -> f32[4]:
+    let lowest = math32.cos(math32.clamp(max_angle, 0.0, math32.pi))
+    let z = 1.0 - u[0] * (1.0 - lowest)
+    let r = math32.sqrt(math32.max(1.0 - z * z, 0.0))
+    let angle = 2.0 * math32.pi * u[1]
+    let local: f32[4] = [r * math32.cos(angle), r * math32.sin(angle), z, 0.0]
+    # Turn +Z onto the center direction.
+    return dihedral([0.0, 0.0, 1.0, 0.0], center).transform(local)
+
+## The standard normal quantile of a uniform number `u` in `(0, 1)` (VEX `sample_normal`):
+## Acklam's rational approximation, relative error below 1.2e-9 before rounding to f32.
+pub func sample_normal(u: f32) -> f32:
+    let p = math.clamp((f64)u, 1.0e-12, 1.0 - 1.0e-12)
+    let low = 0.02425
+    if p < low or p > 1.0 - low:
+        let q = math.sqrt(-2.0 * math.log(p if p < low else 1.0 - p))
+        let tail = (((((-0.007784894002430293 * q - 0.3223964580411365) * q - 2.400758277161838) * q - 2.549732539343734) * q + 4.374664141464968) * q + 2.938163982698783) / ((((0.007784695709041462 * q + 0.3224671290700398) * q + 2.445134137142996) * q + 3.754408661907416) * q + 1.0)
+        return (f32)(tail if p < low else -tail)
+    let q = p - 0.5
+    let r = q * q
+    return (f32)((((((-39.69683028665376 * r + 220.9460984245205) * r - 275.9285104469687) * r + 138.3577518672690) * r - 30.66479806614716) * r + 2.506628274631) * q / (((((-54.47609879822406 * r + 161.5858368580409) * r - 155.6989798598866) * r + 66.80131188771972) * r - 13.28068155288572) * r + 1.0))
+
+## `sample_normal` with mean `mean` and standard deviation `deviation`.
+pub func sample_normal_scaled(mean: f32, deviation: f32, u: f32) -> f32:
+    return mean + deviation * sample_normal(u)

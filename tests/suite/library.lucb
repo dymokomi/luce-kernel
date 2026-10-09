@@ -28,6 +28,8 @@ pub func run_all() -> !:
     matrices()
     transforms()
     quaternions()
+    noises()
+    sampling()
     try lowered()
 
 func arithmetic():
@@ -163,17 +165,89 @@ func quaternions():
         near3("quaterniontoeuler back", lib.quaterniontoeuler(turned, order), angles, 0.0001)
     print("ok    library quaternions: quaternion, qmultiply, qrotate, qinvert, qconvert, slerp, Euler orders")
 
+func noises():
+    let h: f32 = 0.01
+    var worst_divergence: f32 = 0.0
+    var largest_partial: f32 = 0.0
+    for i in 0..<200:
+        let p = lib.rand3((i64)i) * 9.0 - [4.0, 4.0, 4.0, 0.0]
+        # Divergence of the curl by central differences: zero up to the stencil's error.
+        let dx = (lib.curlnoise(p + [h, 0.0, 0.0, 0.0])[0] - lib.curlnoise(p - [h, 0.0, 0.0, 0.0])[0]) / (2.0 * h)
+        let dy = (lib.curlnoise(p + [0.0, h, 0.0, 0.0])[1] - lib.curlnoise(p - [0.0, h, 0.0, 0.0])[1]) / (2.0 * h)
+        let dz = (lib.curlnoise(p + [0.0, 0.0, h, 0.0])[2] - lib.curlnoise(p - [0.0, 0.0, h, 0.0])[2]) / (2.0 * h)
+        worst_divergence = math32.max(worst_divergence, math32.abs(dx + dy + dz))
+        largest_partial = math32.max(largest_partial, math32.max(math32.abs(dx), math32.max(math32.abs(dy), math32.abs(dz))))
+        # The analytic gradient against central differences of the value.
+        let n = lib.xnoised(p)
+        for k: usize in 0..<3:
+            var step: f32[4] = [0.0, 0.0, 0.0, 0.0]
+            step[k] = h
+            let numeric = (lib.xnoised(p + step).value - lib.xnoised(p - step).value) / (2.0 * h)
+            near("the noise gradient", n.derivative[k], numeric, 0.01)
+        let w = lib.wnoise(p)
+        if not (w.f1 >= 0.0 and w.f1 <= w.f2 and w.f1 < 1.75): trap("library: worley f1 <= f2")
+        let period = lib.pnoise(p, 3, 4, 5) - lib.pnoise(p + [3.0, -8.0, 15.0, 0.0], 3, 4, 5)
+        near("pnoise repeats at its periods", period, 0.0, 0.0001)
+        near("flownoise without flow", lib.flownoise(p, 0.0), n.value)
+        let fractal = lib.onoise(p, 4, 0.5, 1.0)
+        let plates = lib.anoise(p, 3, 0.5, 1.0)
+        if fractal < 0.0 or fractal > 1.0 or plates < 0.0 or plates > 1.0: trap("library: fractal noise out of 0..1")
+        near("cell noise is constant over a cell", lib.mx_cellnoise(p), lib.mx_cellnoise([math32.floor(p[0]) + 0.5, math32.floor(p[1]) + 0.5, math32.floor(p[2]) + 0.5, 0.0]))
+    if worst_divergence > 0.02 * largest_partial: trap("library: curl noise is not divergence-free")
+    if lib.flownoise([0.3, 0.7, 0.2, 0.0], 0.0) == lib.flownoise([0.3, 0.7, 0.2, 0.0], 1.0): trap("library: flow turns the gradients")
+    print(f"ok    library noise: curl divergence {worst_divergence} beside partials up to {largest_partial}, gradients, worley, periods, flow, fractals, cells")
+
+func sampling():
+    near("the median of a normal", lib.sample_normal(0.5), 0.0)
+    near("a 97.5% normal quantile", lib.sample_normal(0.975), 1.959964)
+    near("a one-sigma quantile", lib.sample_normal(0.8413447), 1.0, 0.0001)
+    near("a low tail", lib.sample_normal(0.001), -3.090232, 0.0001)
+    # Sobol: 64 points put exactly one in each 1/64 slice of every axis, scrambled or not.
+    for seed: i64 in 0..<3:
+        var seen: bool[192]
+        for index: i64 in 0..<64:
+            let q = lib.random_sobol(seed, index)
+            for k: usize in 0..<3:
+                let slot = k * 64 + (usize)(q[k] * 64.0)
+                if seen[slot]: trap("library: Sobol points stratify")
+                seen[slot] = true
+    for mean in [4.0, 50.0]:
+        var total: f64 = 0.0
+        for seed: i64 in 0..<20000: total += (f64)lib.random_poisson(seed, (f32)mean)
+        near("a Poisson mean", (f32)(total / 20000.0), (f32)mean, 0.03)
+    var cubed: f64 = 0.0
+    for i: i64 in 0..<4000:
+        let u = lib.rand3(i)
+        let disk = lib.sample_circle_uniform([u[0], u[1]])
+        if disk[0] * disk[0] + disk[1] * disk[1] > 1.0: trap("library: inside the disk")
+        let ball = lib.sample_sphere_uniform(u)
+        let r = lib.length(ball)
+        if r > 1.0: trap("library: inside the ball")
+        cubed += (f64)(r * r * r)
+        let up = lib.sample_hemisphere([u[0], u[1]])
+        near("hemisphere directions are unit", lib.length(up), 1.0)
+        if up[2] < 0.0: trap("library: the hemisphere is +Z's")
+        let axis: f32[4] = [1.0, 1.0, 0.0, 0.0]
+        let cone = lib.sample_direction_cone(axis, 0.3, [u[0], u[2]])
+        near("cone directions are unit", lib.length(cone), 1.0)
+        if lib.dot(cone, lib.normalized(axis)) < math32.cos(0.3) - 0.0001: trap("library: inside the cone")
+    near("the ball fills evenly (mean r^3 is 1/2)", (f32)(cubed / 4000.0), 0.5, 0.03)
+    print("ok    library sampling: normal quantiles, Sobol strata, Poisson means, disk, ball, hemisphere, cone")
+
 ## Snippets over the library, lowered and run, against the functions called directly.
-let cases: str[6] = [
+let cases: str[9] = [
     "let m = Mat3.rotation(p.P[0], [0.3, 1.0, 0.2, 0.0]).scale([1.0, 2.0, 0.5, 0.0])\np.Cd = m.inverted().transform(p.P)\n",
     "let q = eulertoquaternion(p.P * 0.7, xform_yzx)\np.Cd = quaterniontoeuler(q, xform_yzx)\n",
     "let m = maketransform(xform_trs, xform_zxy, p.P, p.P * 40.0, [1.0, 2.0, 0.5, 0.0], [0.1, 0.2, 0.3, 0.0])\np.Cd = cracktransform(xform_trs, xform_zxy, 1, [0.1, 0.2, 0.3, 0.0], m)\n",
     "let r = solvecubic(1.0, -p.P[0], -1.0, p.P[1])\np.Cd = [(f32)r.count, r.roots[0], r.roots[r.count - 1], 0.0]\n",
     "var keys: f32[16]\nfor i in 0..<6:\n    keys[i] = math32.sin((f32)i + p.P[0])\np.Cd = [spline(spline_catrom, p.P[1], keys, 6), spline(spline_monotone, p.P[1] * 0.9, keys, 6), lspline(p.P[2], keys, 6), 0.0]\n",
+    "let w = wnoise(p.P * 3.0)\np.Cd = curlnoise(p.P) + [w.f1, w.f2 - w.f1, (f32)(w.seed % 7), 0.0]\n",
+    "let n = noised(p.P * 2.0)\np.Cd = [pnoise(p.P * 5.0, 2, 3, 4) + n.value, flownoise(p.P, p.P[1]) + n.derivative[1], onoise(p.P, 3, 0.6, 1.5) + anoise(p.P, 2, 0.5, 1.0), 0.0]\n",
+    "let s = random_sobol(5, (i64)p.ptnum)\nlet c = sample_direction_cone([0.0, 1.0, 1.0, 0.0], 0.5, [s[0], s[1]])\np.Cd = c + sample_sphere_uniform(s) * (sample_normal(s[2] * 0.9 + 0.05) + (f32)random_poisson((i64)p.ptnum, 3.5) + mx_cellnoise(p.P * 4.0))\n",
     "let q = slerp(quaternion(p.P[0], [0.0, 1.0, 0.0, 0.0]), quaternion_of(lookat(p.P, [0.0, 0.0, 0.0, 0.0])), p.P[1])\np.Cd = qrotate(q, polardecomp(dihedral(p.P, [1.0, 1.0, 0.0, 0.0])).transform([rint(p.P[0] * 4.0), frac(-p.P[2]), sinpi(p.P[0]), 0.0]))\n",
 ]
 
-func expected(case: usize, p: f32[4]) -> f32[4]:
+func expected(case: usize, p: f32[4], at: usize) -> f32[4]:
     match case:
         0:
             let m = Mat3.rotation(p[0], [0.3, 1.0, 0.2, 0.0]).scale([1.0, 2.0, 0.5, 0.0])
@@ -191,6 +265,16 @@ func expected(case: usize, p: f32[4]) -> f32[4]:
             for i in 0..<6:
                 keys[i] = math32.sin((f32)i + p[0])
             return [lib.spline(lib.spline_catrom, p[1], keys, 6), lib.spline(lib.spline_monotone, p[1] * 0.9, keys, 6), lib.lspline(p[2], keys, 6), 0.0]
+        5:
+            let w = lib.wnoise(p * 3.0)
+            return lib.curlnoise(p) + [w.f1, w.f2 - w.f1, (f32)(w.seed % 7), 0.0]
+        6:
+            let n = lib.noised(p * 2.0)
+            return [lib.pnoise(p * 5.0, 2, 3, 4) + n.value, lib.flownoise(p, p[1]) + n.derivative[1], lib.onoise(p, 3, 0.6, 1.5) + lib.anoise(p, 2, 0.5, 1.0), 0.0]
+        7:
+            let q = lib.random_sobol(5, (i64)at)
+            let c = lib.sample_direction_cone([0.0, 1.0, 1.0, 0.0], 0.5, [q[0], q[1]])
+            return c + lib.sample_sphere_uniform(q) * (lib.sample_normal(q[2] * 0.9 + 0.05) + (f32)lib.random_poisson((i64)at, 3.5) + lib.mx_cellnoise(p * 4.0))
         _:
             let q = lib.slerp(lib.quaternion(p[0], [0.0, 1.0, 0.0, 0.0]), lib.quaternion_of(lib.lookat(p, [0.0, 0.0, 0.0, 0.0])), p[1])
             return lib.qrotate(q, lib.polardecomp(lib.dihedral(p, [1.0, 1.0, 0.0, 0.0])).transform([lib.rint(p[0] * 4.0), lib.frac(-p[2]), lib.sinpi(p[0]), 0.0]))
@@ -208,7 +292,7 @@ func lowered() -> !:
         assert(try columns.run(&compiled, common.no_uniforms()) == none)
         for at in 0..<lowering.points:
             let p: f32[4] = [columns.positions[at * 3], columns.positions[at * 3 + 1], columns.positions[at * 3 + 2], 0.0]
-            let want = expected(case, p)
+            let want = expected(case, p, at)
             for k: usize in 0..<3:
                 if not (math32.abs(columns.colors[at * 3 + k] - want[k]) <= 0.0001 * math32.max(1.0, math32.abs(want[k]))):
                     print(f"FAIL  library lowered case {case} point {at} lane {k}: {columns.colors[at * 3 + k]}, wanted {want[k]}")

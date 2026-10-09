@@ -1,0 +1,161 @@
+# Hashed-gradient Perlin noise with its derivative: the core of `pnoise` (periodic),
+# `flownoise` (rotating gradients), `noised`/`xnoised` (value and gradient) and `curlnoise`.
+# Unlike `noise`, whose permutation table the engine reads, each lattice corner's gradient
+# comes from `random_bits` of the corner, so the field lowers to plain column arithmetic
+# and wraps exactly at a period. Gradients are the twelve cube-edge directions, faded with
+# Perlin's quintic; the value is scaled to about -1..1, as `snoise`.
+
+## A noise value and its gradient (lanes 0 to 2; lane 3 zero).
+pub struct NoiseD:
+    pub var value: f32 = 0.0
+    pub var derivative: f32[4] = [0.0, 0.0, 0.0, 0.0]
+
+## Scales the 3D sum into about -1..1 (Gustavson's factor for these gradients).
+let gradient_scale: f32 = 0.936
+
+## The lattice coordinate `c` wrapped into `0..<period` (no wrap for a period below 1).
+func wrapped(c: i64, period: i32) -> i64:
+    if period < 1: return c
+    let p = (i64)period
+    return ((c % p) + p) % p
+
+## The hash of corner (x, y, z).
+func corner_bits(x: i64, y: i64, z: i64) -> u64:
+    let mixed = (x *% 0x9E3779B1) ^ (y *% 0x85EBCA77) ^ (z *% 0xC2B2AE3D)
+    return random_bits(mixed, 11)
+
+## One of the twelve edge directions (±1, ±1, 0) and the like, picked by `bits`.
+func edge_direction(bits: u64) -> f32[4]:
+    let group = (bits >> 8) % 3
+    let a: f32 = 1.0 if (bits & 1) == 0 else -1.0
+    let b: f32 = 1.0 if (bits & 2) == 0 else -1.0
+    let x: f32 = 0.0 if group == 2 else a
+    let y: f32 = b if group == 0 else (a if group == 2 else 0.0)
+    let z: f32 = 0.0 if group == 0 else b
+    return [x, y, z, 0.0]
+
+## Corner gradient for `bits`, turned by `flow` radians (times a per-corner rate in
+## 0.5..1.5) about a per-corner axis when `flow` is not zero.
+func corner_gradient(bits: u64, flow: f32) -> f32[4]:
+    let g = edge_direction(bits)
+    if flow == 0.0:
+        return g
+    let k = normalized(edge_direction(bits >> 16))
+    let angle = flow * (0.5 + (f32)((bits >> 40) & 1023) * (1.0 / 1023.0))
+    let c = math32.cos(angle)
+    let s = math32.sin(angle)
+    return g * c + cross(k, g) * s + k * (dot(k, g) * (1.0 - c))
+
+func fade(t: f32) -> f32:
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+func fade_slope(t: f32) -> f32:
+    return 30.0 * t * t * (t - 1.0) * (t - 1.0)
+
+## Signed gradient noise at `p` (lanes 0 to 2) with its gradient: periodic along an axis
+## whose period (`periods` lane) is 1 or more, its gradients turned by `flow` radians.
+pub func gradient_noise(p: f32[4], periods: i32[4], flow: f32) -> NoiseD:
+    let fx = math32.floor(p[0])
+    let fy = math32.floor(p[1])
+    let fz = math32.floor(p[2])
+    let x0 = (i64)fx
+    let y0 = (i64)fy
+    let z0 = (i64)fz
+    let dx = p[0] - fx
+    let dy = p[1] - fy
+    let dz = p[2] - fz
+    let ax = wrapped(x0, periods[0])
+    let bx = wrapped(x0 + 1, periods[0])
+    let ay = wrapped(y0, periods[1])
+    let by = wrapped(y0 + 1, periods[1])
+    let az = wrapped(z0, periods[2])
+    let bz = wrapped(z0 + 1, periods[2])
+    let g000 = corner_gradient(corner_bits(ax, ay, az), flow)
+    let g100 = corner_gradient(corner_bits(bx, ay, az), flow)
+    let g010 = corner_gradient(corner_bits(ax, by, az), flow)
+    let g110 = corner_gradient(corner_bits(bx, by, az), flow)
+    let g001 = corner_gradient(corner_bits(ax, ay, bz), flow)
+    let g101 = corner_gradient(corner_bits(bx, ay, bz), flow)
+    let g011 = corner_gradient(corner_bits(ax, by, bz), flow)
+    let g111 = corner_gradient(corner_bits(bx, by, bz), flow)
+    let n000 = dot(g000, [dx, dy, dz, 0.0])
+    let n100 = dot(g100, [dx - 1.0, dy, dz, 0.0])
+    let n010 = dot(g010, [dx, dy - 1.0, dz, 0.0])
+    let n110 = dot(g110, [dx - 1.0, dy - 1.0, dz, 0.0])
+    let n001 = dot(g001, [dx, dy, dz - 1.0, 0.0])
+    let n101 = dot(g101, [dx - 1.0, dy, dz - 1.0, 0.0])
+    let n011 = dot(g011, [dx, dy - 1.0, dz - 1.0, 0.0])
+    let n111 = dot(g111, [dx - 1.0, dy - 1.0, dz - 1.0, 0.0])
+    let u = fade(dx)
+    let v = fade(dy)
+    let w = fade(dz)
+    # The trilinear blend as a polynomial in the fades, and its derivative (Quilez).
+    let k1 = n100 - n000
+    let k2 = n010 - n000
+    let k3 = n001 - n000
+    let k4 = n000 - n100 - n010 + n110
+    let k5 = n000 - n010 - n001 + n011
+    let k6 = n000 - n100 - n001 + n101
+    let k7 = -n000 + n100 + n010 - n110 + n001 - n101 - n011 + n111
+    let value = n000 + k1 * u + k2 * v + k3 * w + k4 * u * v + k5 * v * w + k6 * w * u + k7 * u * v * w
+    let blended = g000 + (g100 - g000) * u + (g010 - g000) * v + (g001 - g000) * w + (g000 - g100 - g010 + g110) * (u * v) + (g000 - g010 - g001 + g011) * (v * w) + (g000 - g100 - g001 + g101) * (w * u) + (g100 + g010 - g000 - g110 + g001 - g101 - g011 + g111) * (u * v * w)
+    let slope: f32[4] = [fade_slope(dx) * (k1 + k4 * v + k6 * w + k7 * v * w), fade_slope(dy) * (k2 + k5 * w + k4 * u + k7 * w * u), fade_slope(dz) * (k3 + k6 * u + k5 * v + k7 * u * v), 0.0]
+    let gradient = blended + slope
+    return NoiseD(value = value * gradient_scale, derivative = [gradient[0] * gradient_scale, gradient[1] * gradient_scale, gradient[2] * gradient_scale, 0.0])
+
+## No period along any axis.
+let unperiodic: i32[4] = [0, 0, 0, 0]
+
+## Periodic noise in about `0..1`, repeating every `px`, `py` and `pz` units along X, Y and
+## Z (VEX `pnoise(pos, px, py, pz)`; a period below 1 does not repeat). Its own gradient
+## lattice: not the same field as `noise`.
+pub func pnoise(p: f32[4], px: i32, py: i32, pz: i32) -> f32:
+    return 0.5 + 0.5 * gradient_noise(p, [px, py, pz, 0], 0.0).value
+
+## Flow noise in about `-1..1`: gradient noise whose gradients turn by `flow` radians (each
+## lattice corner at its own rate), so advancing `flow` swirls the pattern in place (VEX
+## `flownoise(pos, flow)`; departure: signed, like `snoise`).
+pub func flownoise(p: f32[4], flow: f32) -> f32:
+    return gradient_noise(p, unperiodic, flow).value
+
+## Noise in about `0..1` and its gradient (VEX `noised`): the gradient-noise lattice, not
+## `noise`'s.
+pub func noised(p: f32[4]) -> NoiseD:
+    let n = gradient_noise(p, unperiodic, 0.0)
+    return NoiseD(value = 0.5 + 0.5 * n.value, derivative = n.derivative * 0.5)
+
+## Signed noise in about `-1..1` and its gradient (VEX `xnoised`; departure: Perlin, not
+## simplex, noise).
+pub func xnoised(p: f32[4]) -> NoiseD:
+    return gradient_noise(p, unperiodic, 0.0)
+
+## A divergence-free field: the curl of three gradient-noise potentials (VEX `curlnoise`).
+## Its divergence is zero analytically; each lane is about `-2..2`.
+pub func curlnoise(p: f32[4]) -> f32[4]:
+    let a = gradient_noise(p, unperiodic, 0.0).derivative
+    let b = gradient_noise(p + [31.416, -47.853, 12.679, 0.0], unperiodic, 0.0).derivative
+    let c = gradient_noise(p + [-23.291, 18.137, 71.551, 0.0], unperiodic, 0.0).derivative
+    return [c[1] - b[2], a[2] - c[0], b[0] - a[1], 0.0]
+
+## A divergence-free 2D field: the gradient of 2D noise turned a quarter (VEX
+## `curlnoise2d`).
+pub func curlnoise2d(p: f32[2]) -> f32[2]:
+    let d = gradient_noise([p[0], p[1], 0.0, 0.0], unperiodic, 0.0).derivative
+    return [d[1], -d[0]]
+
+## Fractal noise of `turbulence` octaves (VEX `onoise(pos, turbulence, rough, atten)`):
+## octave `i` is gradient noise at `p * 2^i` weighted `rough^i`, the weighted mean taken
+## into `0..1` and raised to `atten` (1 keeps it, above 1 darkens).
+pub func onoise(p: f32[4], turbulence: i32, rough: f32, atten: f32) -> f32:
+    var total: f32 = 0.0
+    var weight: f32 = 0.0
+    var amplitude: f32 = 1.0
+    var frequency: f32 = 1.0
+    let octaves = turbulence if turbulence > 0 else 1
+    for _ in 0..<octaves:
+        total += amplitude * gradient_noise(p * frequency, unperiodic, 0.0).value
+        weight += amplitude
+        amplitude *= rough
+        frequency *= 2.0
+    let base = math32.clamp(0.5 + 0.5 * total / weight, 0.0, 1.0)
+    return math32.pow(base, atten)

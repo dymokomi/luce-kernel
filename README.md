@@ -31,7 +31,10 @@ Three public modules:
   lookat dihedral polardecomp` with the `xform_*` orders, `abs sign frac rint trunc min
   max avg sum product pow exp log log10 cbrt sinpi cospi tanpi`, `solvequadratic
   solvecubic`, the point distances, and `efit fit10 fit11 invlerp lspline cspline kspline
-  spline`. The engine runs the first group as column operations; the rest lower from their
+  spline`; noise and sampling: `pnoise flownoise noised xnoised curlnoise curlnoise2d onoise
+  wnoise mx_cellnoise anoise nrandom random_sobol random_poisson sample_circle_uniform
+  sample_direction_uniform sample_sphere_uniform sample_hemisphere sample_direction_cone
+  sample_normal`. The engine runs the first group as column operations; the rest lower from their
   Base bodies like a snippet's own helpers (structs, methods and all). A snippet imports
   only the lib names it uses and does not declare itself.
 

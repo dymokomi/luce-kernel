@@ -22,7 +22,7 @@ pub enum Part:
     body
 
 ## The functions `lib` gives a snippet without an import.
-let lib_names: str[130] = [
+let lib_names: str[154] = [
     "lerp", "lerp64", "clamp", "clamp64", "fit01", "fit01_64", "fit", "fit64", "smooth", "smooth64",
     "degrees", "degrees64", "radians", "radians64", "dot", "cross", "length", "length2", "distance", "distance2",
     "normalized", "dot2d", "length2d", "distance2d", "normalized2d", "dot64", "cross64", "length64", "length2_64", "distance64",
@@ -36,6 +36,9 @@ let lib_names: str[130] = [
     "ident4", "xform_srt", "xform_str", "xform_rst", "xform_rts", "xform_tsr", "xform_trs", "xform_xyz", "xform_xzy", "xform_yxz",
     "xform_yzx", "xform_zxy", "xform_zyx", "euler_matrix", "matrix_euler", "maketransform", "cracktransform", "lookat", "dihedral", "polardecomp",
     "Quat", "quaternion", "quaternion_of", "qmultiply", "qrotate", "qinvert", "qconvert", "slerp", "eulertoquaternion", "quaterniontoeuler",
+    "NoiseD", "gradient_noise", "pnoise", "flownoise", "noised", "xnoised", "curlnoise", "curlnoise2d", "onoise", "Worley",
+    "wnoise", "mx_cellnoise", "alligator", "anoise", "nrandom", "random_sobol", "random_poisson", "sample_circle_uniform", "sample_direction_uniform", "sample_sphere_uniform",
+    "sample_hemisphere", "sample_direction_cone", "sample_normal", "sample_normal_scaled",
 ]
 
 ## A wrapped snippet: the module text and where the header and body lines are in it.

@@ -9,3 +9,6 @@ spline.lucb
 matrix.lucb
 transform.lucb
 quaternion.lucb
+gradient.lucb
+cellular.lucb
+sampling.lucb
