@@ -203,12 +203,10 @@ def signature(name, kind, operands, faults, result_kind=None, source_kinds=None)
 def loop_function(name, kind, operands, expression, fault, result_kind=None, source_kinds=None):
     text = signature(name, kind, operands, fault is not None, result_kind, source_kinds)
     if fault is None:
-        # LUCE-BUG: `for i in 0..<d.length` is not vectorized at --opt 3; this `while` form,
-        # after an assert of the lengths (equal by construction: every view is the chunk's
-        # live lanes), is. Back to `for` once the vectorizer takes it.
+        # The assert of the lengths (equal by construction: every view is the chunk's live
+        # lanes) lets the --opt 3 vectorizer drop the bounds checks and take the loop.
         checks = " and ".join(f"{operand}.length == d.length" for operand in operands)
-        return (text + f"    assert({checks})\n    var i: usize = 0\n    while i < d.length:\n"
-                f"        d[i] = {expression}\n        i += 1\n")
+        return text + f"    assert({checks})\n    for i in 0..<d.length: d[i] = {expression}\n"
     return text + "    for i in 0..<d.length:\n" + fault + "    return d.length\n"
 
 
@@ -236,9 +234,7 @@ def dispatcher(name, doc, table):
 
 
 def write(file_name, title, functions, dispatch):
-    note = ("# LUCE-BUG: loops that cannot fault are `while` loops after a length assert, the form\n"
-            "# the --opt 3 vectorizer takes (it skips `for i in 0..<n`); see tools/lanes.py.\n")
-    body = HEADER + f"# {title}\n" + note + "\n" + dispatch + "\n" + "\n".join(functions)
+    body = HEADER + f"# {title}\n\n" + dispatch + "\n" + "\n".join(functions)
     (ENGINE / file_name).write_text(body)
 
 

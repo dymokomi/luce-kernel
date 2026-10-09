@@ -1,7 +1,6 @@
 # Data movement: copies, masked assignment, select, element numbers, and indexed register
 # reads and writes. Moves work by size class, so one loop serves every kind of a width.
-# LUCE-BUG: the lane loops are `while` loops after a length assert, the form the --opt 3
-# vectorizer takes (it skips `for i in 0..<n`); back to `for` once it takes them.
+# Lane loops assert their lengths, which lets the --opt 3 vectorizer take them.
 
 ## d = a on every live lane.
 func copy_lanes(w: Worker*, ins: Instruction):
@@ -12,24 +11,15 @@ func copy_lanes(w: Worker*, ins: Instruction):
 
 func copy8(d: u8[], a: const u8[]):
     assert(a.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = a[i]
-        i += 1
+    for i in 0..<d.length: d[i] = a[i]
 
 func copy32(d: u32[], a: const u32[]):
     assert(a.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = a[i]
-        i += 1
+    for i in 0..<d.length: d[i] = a[i]
 
 func copy64(d: u64[], a: const u64[]):
     assert(a.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = a[i]
-        i += 1
+    for i in 0..<d.length: d[i] = a[i]
 
 ## d = a on the active lanes; inactive lanes keep d.
 func assign_lanes(w: Worker*, ins: Instruction):
@@ -44,24 +34,15 @@ func assign_lanes(w: Worker*, ins: Instruction):
 
 func assign8(d: u8[], a: const u8[], exec: const u8[]):
     assert(a.length == d.length and exec.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = a[i] if exec[i] != 0 else d[i]
-        i += 1
+    for i in 0..<d.length: d[i] = a[i] if exec[i] != 0 else d[i]
 
 func assign32(d: u32[], a: const u32[], exec: const u8[]):
     assert(a.length == d.length and exec.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = a[i] if exec[i] != 0 else d[i]
-        i += 1
+    for i in 0..<d.length: d[i] = a[i] if exec[i] != 0 else d[i]
 
 func assign64(d: u64[], a: const u64[], exec: const u8[]):
     assert(a.length == d.length and exec.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = a[i] if exec[i] != 0 else d[i]
-        i += 1
+    for i in 0..<d.length: d[i] = a[i] if exec[i] != 0 else d[i]
 
 ## d = b where mask a is set, else c.
 func select_lanes(w: Worker*, ins: Instruction):
@@ -73,24 +54,15 @@ func select_lanes(w: Worker*, ins: Instruction):
 
 func select8(d: u8[], mask: const u8[], b: const u8[], c: const u8[]):
     assert(mask.length == d.length and b.length == d.length and c.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = b[i] if mask[i] != 0 else c[i]
-        i += 1
+    for i in 0..<d.length: d[i] = b[i] if mask[i] != 0 else c[i]
 
 func select32(d: u32[], mask: const u8[], b: const u32[], c: const u32[]):
     assert(mask.length == d.length and b.length == d.length and c.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = b[i] if mask[i] != 0 else c[i]
-        i += 1
+    for i in 0..<d.length: d[i] = b[i] if mask[i] != 0 else c[i]
 
 func select64(d: u64[], mask: const u8[], b: const u64[], c: const u64[]):
     assert(mask.length == d.length and b.length == d.length and c.length == d.length)
-    var i: usize = 0
-    while i < d.length:
-        d[i] = b[i] if mask[i] != 0 else c[i]
-        i += 1
+    for i in 0..<d.length: d[i] = b[i] if mask[i] != 0 else c[i]
 
 ## d = the lane's element number (`run` checks that every number fits the kind).
 func index_lanes(w: Worker*, ins: Instruction):
