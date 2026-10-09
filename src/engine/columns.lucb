@@ -130,6 +130,7 @@ pub enum FaultKind:
     loop_cap
     host
     limit
+    user
 
 extend FaultKind:
     ## The plain wording: "index out of bounds".
@@ -145,6 +146,7 @@ extend FaultKind:
             .loop_cap => "loop ran too many times"
             .host => "builtin failed"
             .limit => "too many additions from one element"
+            .user => "error"
 
 ## A run that stopped: the fault of the lowest failing lane, where the program came from
 ## there, and the message (the `check` or `trap` text, else the kind's wording). The

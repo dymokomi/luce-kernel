@@ -195,6 +195,10 @@ extend Lowerer:
                     if binding.role == .field:
                         let at = try self.column_use(node, binding.column, binding.components, node.type_id)
                         self.mark_read(at)
+                    else:
+                        # A method of an API value another call gives (`g.pcopen(p.P,
+                        # 0.1, 8).count()`): that call reads columns too.
+                        try self.scan_expression(node.left, depth)
                     return
             .call:
                 if let binding = self.call_binding(node):

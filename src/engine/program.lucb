@@ -53,6 +53,8 @@ pub struct Binding:
 ## consecutive result registers.
 struct Site:
     let builtin: Builtin
+    ## Its place in the program's sites.
+    let number: usize
     let arguments: u16[32]
     let results: u16
     let texts: str[4]

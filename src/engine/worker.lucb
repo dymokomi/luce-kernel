@@ -31,6 +31,9 @@ struct Worker:
     ## The host's context for this run, and the kind of the last builtin's fault.
     var run_context: void*?
     var call_kind: FaultKind
+    var call_message: str
+    ## A `user` fault's message.
+    var fault_message: str
     ## This worker's number in the run, below `workers_of(request)`.
     var number: usize
 
@@ -96,6 +99,7 @@ struct Worker:
         self.fault_lane = self.first + lane
         self.fault_instruction = instruction
         self.fault_kind = kind
+        self.fault_message = self.call_message if kind == .user else ""
         self.n = lane
 
     ## Make mask register `register` the exec mask (a copy: later writes to the register

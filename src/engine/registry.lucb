@@ -42,6 +42,7 @@ pub struct Call:
     let site: const Site*
     var failed: usize
     var kind: FaultKind = FaultKind.host
+    var message: str = ""
 
     ## The number of the worker running this call, below `workers_of(request)`; one
     ## worker runs its calls one at a time, in order (for per-worker host queues).
@@ -66,6 +67,18 @@ pub struct Call:
         if self.active(lane) and lane < self.failed:
             self.failed = lane
             self.kind = kind
+
+    ## Fail at `lane` with the snippet's own `message` (a `user` fault: the run's fault
+    ## carries it). It must live as long as the program: a call site's `text`.
+    pub func fail_with(lane: usize, message: str):
+        if self.active(lane) and lane < self.failed:
+            self.failed = lane
+            self.kind = .user
+            self.message = message
+
+    ## The number of the call site this call runs, below the program's `call_count()`.
+    pub func site_number() -> usize:
+        return self.site.number
 
     ## Argument `index` as f32 lanes (empty when it is not an f32 argument).
     pub func f32_argument(index: usize) -> const f32[]:

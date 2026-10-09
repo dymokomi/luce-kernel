@@ -15,6 +15,7 @@ struct ChunkFault:
     var lane: usize
     var instruction: usize
     var kind: FaultKind
+    var message: str
 
 ## What every worker of a run shares.
 struct Shared:
@@ -198,7 +199,7 @@ func run_chunk(context: void*, index: usize, number: usize) -> !:
         load_input(w, &shared.inputs[at])
     execute(w, shared)
     if w.failed:
-        shared.faults[index] = ChunkFault(failed = true, lane = w.fault_lane, instruction = w.fault_instruction, kind = w.fault_kind)
+        shared.faults[index] = ChunkFault(failed = true, lane = w.fault_lane, instruction = w.fault_instruction, kind = w.fault_kind, message = w.fault_message)
         _ = shared.lowest.min(w.fault_lane, .acq_rel)
 
 ## The fault of the lowest failing lane over every chunk.
@@ -207,6 +208,6 @@ func lowest_fault(program: const Program*, faults: const ChunkFault[]) -> Fault?
         if not found.failed:
             continue
         let source = program.sources.at(found.instruction)
-        let message = source.message if source.message.length > 0 else found.kind.wording()
+        let message = found.message if found.kind == .user and found.message.length > 0 else (source.message if source.message.length > 0 else found.kind.wording())
         return Fault(kind = found.kind, lane = found.lane, instruction = found.instruction, line = source.line, column = source.column, message = message)
     return none

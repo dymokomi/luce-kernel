@@ -363,7 +363,7 @@ pub struct Builder:
         var kept: str[4] = ["", "", "", ""]
         for (at, text) in texts.indexed():
             kept[at] = self.keep(text)
-        let site = Site(builtin = builtin, arguments = registers, results = results, texts = kept, text_count = texts.length)
+        let site = Site(builtin = builtin, number = self.program.sites.length(), arguments = registers, results = results, texts = kept, text_count = texts.length)
         let index = self.program.sites.length()
         self.program.sites.append(site) catch failure:
             self.fail("out of memory")

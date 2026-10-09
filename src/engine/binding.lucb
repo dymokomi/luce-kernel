@@ -92,4 +92,5 @@ func call_lanes(w: Worker*, ins: Instruction, program: const Program*) -> usize:
     let entry = site.builtin.run
     entry(&call)
     w.call_kind = call.kind
+    w.call_message = call.message
     return call.failed

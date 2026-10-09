@@ -254,15 +254,27 @@ extend Lowerer:
                     registers[0] = handle.lanes[0]
                     count = 1
                     uniform = handle.uniform
+        # The given arguments, then the defaults of the parameters left out (the stub's
+        # declaration says which).
         var cursor = e.body
-        while let argument = cursor:
-            let node = argument.left else return self.nothing()
+        var parameter: ast.Node*? = none
+        if let decl = e.resolved:
+            if decl.kind == ast.Kind.func_: parameter = decl.right
+        while cursor != none or parameter != none:
+            var given: ast.Node*? = none
+            if let argument = cursor:
+                given = argument.left
+                cursor = argument.next
+            elif let left_out = parameter:
+                given = left_out.left
+                if given == none: return try self.fail_value(e, "a missing argument")
+            if let declared = parameter: parameter = declared.next
+            let node = given else return self.nothing()
             if node.type_id == types.str_id:
                 if text_count >= 4:
                     return try self.fail_value(node, "at most four texts to one call")
                 texts[text_count] = try self.text_literal(node)
                 text_count += 1
-                cursor = argument.next
                 continue
             let value = try self.expression(node)
             uniform = uniform and value.uniform
@@ -273,7 +285,6 @@ extend Lowerer:
                     return try self.fail_value(node, "an argument of another kind than the builtin takes")
                 registers[count] = value.lanes[k]
                 count += 1
-            cursor = argument.next
         if count != builtin.argument_count:
             return try self.fail_value(e, "fewer argument lanes than the builtin takes")
         self.position(e)
@@ -285,6 +296,14 @@ extend Lowerer:
             return try self.fail_value(e, text)
         if e.type_id == types.unit_id:
             return self.nothing()
+        # A builtin giving an API value (`g.pcopen(...)`): its one i64 result names it,
+        # and its methods take that number first.
+        if self.api_type(e.type_id) != none:
+            if builtin.result_count != 1 or builtin.results[0] != .i64:
+                return try self.fail_value(e, "a builtin giving an API value returns one i64")
+            var named = self.scalar(.i64, first, false, e.type_id)
+            named.handle = true
+            return named
         if let shape = self.record(e.type_id):
             if shape.width != builtin.result_count:
                 return try self.fail_value(e, "a builtin whose results differ from the method's type")
