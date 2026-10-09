@@ -52,32 +52,41 @@ func fade(t: f32) -> f32:
 func fade_slope(t: f32) -> f32:
     return 30.0 * t * t * (t - 1.0) * (t - 1.0)
 
-## Signed gradient noise at `p` (lanes 0 to 2) with its gradient: periodic along an axis
-## whose period (`periods` lane) is 1 or more, its gradients turned by `flow` radians.
-pub func gradient_noise(p: f32[4], periods: i32[4], flow: f32) -> NoiseD:
+## The eight corners of a lattice cell around `p` (wrapped by `periods`), their hashes
+## in corner order 000, 100, 010, 110, 001, 101, 011, 111, and `p`'s place in the cell.
+struct Cell:
+    var bits: u64[8]
+    var offset: f32[4]
+
+func cell_of(p: f32[4], periods: i32[4]) -> Cell:
     let fx = math32.floor(p[0])
     let fy = math32.floor(p[1])
     let fz = math32.floor(p[2])
     let x0 = (i64)fx
     let y0 = (i64)fy
     let z0 = (i64)fz
-    let dx = p[0] - fx
-    let dy = p[1] - fy
-    let dz = p[2] - fz
     let ax = wrapped(x0, periods[0])
     let bx = wrapped(x0 + 1, periods[0])
     let ay = wrapped(y0, periods[1])
     let by = wrapped(y0 + 1, periods[1])
     let az = wrapped(z0, periods[2])
     let bz = wrapped(z0 + 1, periods[2])
-    let g000 = corner_gradient(corner_bits(ax, ay, az), flow)
-    let g100 = corner_gradient(corner_bits(bx, ay, az), flow)
-    let g010 = corner_gradient(corner_bits(ax, by, az), flow)
-    let g110 = corner_gradient(corner_bits(bx, by, az), flow)
-    let g001 = corner_gradient(corner_bits(ax, ay, bz), flow)
-    let g101 = corner_gradient(corner_bits(bx, ay, bz), flow)
-    let g011 = corner_gradient(corner_bits(ax, by, bz), flow)
-    let g111 = corner_gradient(corner_bits(bx, by, bz), flow)
+    return Cell(bits = [corner_bits(ax, ay, az), corner_bits(bx, ay, az), corner_bits(ax, by, az), corner_bits(bx, by, az), corner_bits(ax, ay, bz), corner_bits(bx, ay, bz), corner_bits(ax, by, bz), corner_bits(bx, by, bz)], offset = [p[0] - fx, p[1] - fy, p[2] - fz, 0.0])
+
+## Perlin's blend of the corners' gradients `g` (corner `k` in lanes `4k..4k+2`) at
+## `d` within the cell: the value and its gradient, scaled to about -1..1.
+func blend(g: f32[32], d: f32[4]) -> NoiseD:
+    let g000: f32[4] = [g[0], g[1], g[2], 0.0]
+    let g100: f32[4] = [g[4], g[5], g[6], 0.0]
+    let g010: f32[4] = [g[8], g[9], g[10], 0.0]
+    let g110: f32[4] = [g[12], g[13], g[14], 0.0]
+    let g001: f32[4] = [g[16], g[17], g[18], 0.0]
+    let g101: f32[4] = [g[20], g[21], g[22], 0.0]
+    let g011: f32[4] = [g[24], g[25], g[26], 0.0]
+    let g111: f32[4] = [g[28], g[29], g[30], 0.0]
+    let dx = d[0]
+    let dy = d[1]
+    let dz = d[2]
     let n000 = dot(g000, [dx, dy, dz, 0.0])
     let n100 = dot(g100, [dx - 1.0, dy, dz, 0.0])
     let n010 = dot(g010, [dx, dy - 1.0, dz, 0.0])
@@ -100,8 +109,27 @@ pub func gradient_noise(p: f32[4], periods: i32[4], flow: f32) -> NoiseD:
     let value = n000 + k1 * u + k2 * v + k3 * w + k4 * u * v + k5 * v * w + k6 * w * u + k7 * u * v * w
     let blended = g000 + (g100 - g000) * u + (g010 - g000) * v + (g001 - g000) * w + (g000 - g100 - g010 + g110) * (u * v) + (g000 - g010 - g001 + g011) * (v * w) + (g000 - g100 - g001 + g101) * (w * u) + (g100 + g010 - g000 - g110 + g001 - g101 - g011 + g111) * (u * v * w)
     let slope: f32[4] = [fade_slope(dx) * (k1 + k4 * v + k6 * w + k7 * v * w), fade_slope(dy) * (k2 + k5 * w + k4 * u + k7 * w * u), fade_slope(dz) * (k3 + k6 * u + k5 * v + k7 * u * v), 0.0]
-    let gradient = blended + slope
-    return NoiseD(value = value * gradient_scale, derivative = [gradient[0] * gradient_scale, gradient[1] * gradient_scale, gradient[2] * gradient_scale, 0.0])
+    let gradient = (blended + slope) * gradient_scale
+    return NoiseD(value = value * gradient_scale, derivative = [gradient[0], gradient[1], gradient[2], 0.0])
+
+## The corners' gradients from bits `shift` up of each corner's hash, turned by `flow`
+## (written out: every lane index constant, so the lanes stay plain registers).
+func corner_gradients(cell: Cell, shift: u64, flow: f32) -> f32[32]:
+    let a = corner_gradient(cell.bits[0] >> shift, flow)
+    let b = corner_gradient(cell.bits[1] >> shift, flow)
+    let c = corner_gradient(cell.bits[2] >> shift, flow)
+    let d = corner_gradient(cell.bits[3] >> shift, flow)
+    let e = corner_gradient(cell.bits[4] >> shift, flow)
+    let f = corner_gradient(cell.bits[5] >> shift, flow)
+    let g = corner_gradient(cell.bits[6] >> shift, flow)
+    let h = corner_gradient(cell.bits[7] >> shift, flow)
+    return [a[0], a[1], a[2], 0.0, b[0], b[1], b[2], 0.0, c[0], c[1], c[2], 0.0, d[0], d[1], d[2], 0.0, e[0], e[1], e[2], 0.0, f[0], f[1], f[2], 0.0, g[0], g[1], g[2], 0.0, h[0], h[1], h[2], 0.0]
+
+## Signed gradient noise at `p` (lanes 0 to 2) with its gradient: periodic along an axis
+## whose period (`periods` lane) is 1 or more, its gradients turned by `flow` radians.
+pub func gradient_noise(p: f32[4], periods: i32[4], flow: f32) -> NoiseD:
+    let cell = cell_of(p, periods)
+    return blend(corner_gradients(cell, 0, flow), cell.offset)
 
 ## No period along any axis.
 let unperiodic: i32[4] = [0, 0, 0, 0]
@@ -132,9 +160,11 @@ pub func xnoised(p: f32[4]) -> NoiseD:
 ## A divergence-free field: the curl of three gradient-noise potentials (VEX `curlnoise`).
 ## Its divergence is zero analytically; each lane is about `-2..2`.
 pub func curlnoise(p: f32[4]) -> f32[4]:
-    let a = gradient_noise(p, unperiodic, 0.0).derivative
-    let b = gradient_noise(p + [31.416, -47.853, 12.679, 0.0], unperiodic, 0.0).derivative
-    let c = gradient_noise(p + [-23.291, 18.137, 71.551, 0.0], unperiodic, 0.0).derivative
+    # Three potentials on one lattice: each corner's hash gives three gradients.
+    let cell = cell_of(p, unperiodic)
+    let a = blend(corner_gradients(cell, 0, 0.0), cell.offset).derivative
+    let b = blend(corner_gradients(cell, 20, 0.0), cell.offset).derivative
+    let c = blend(corner_gradients(cell, 40, 0.0), cell.offset).derivative
     return [c[1] - b[2], a[2] - c[0], b[0] - a[1], 0.0]
 
 ## A divergence-free 2D field: the gradient of 2D noise turned a quarter (VEX

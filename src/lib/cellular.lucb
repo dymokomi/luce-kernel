@@ -19,10 +19,11 @@ func cell_bits(x: i64, y: i64, z: i64, stream: u32) -> u64:
 func unit_of(bits: u64) -> f32:
     return (f32)(bits >> 40) * (1.0 / 16777216.0)
 
-## The feature point of cell (x, y, z).
+## The feature point of cell (x, y, z): three 21-bit fractions of one hash.
 func feature(x: i64, y: i64, z: i64) -> f32[4]:
     let bits = cell_bits(x, y, z, 21)
-    return [(f32)x + unit_of(bits), (f32)y + unit_of(bits << 24), (f32)z + unit_of(cell_bits(x, y, z, 22)), 0.0]
+    let scale: f32 = 1.0 / 2097152.0
+    return [(f32)x + (f32)(bits >> 43) * scale, (f32)y + (f32)((bits >> 22) & 0x1FFFFF) * scale, (f32)z + (f32)((bits >> 1) & 0x1FFFFF) * scale, 0.0]
 
 ## The two nearest feature points' distances from `p` (VEX `wnoise(pos, seed, f1, f2)`;
 ## departure: distances, not squared distances). Always `f1 <= f2`.
@@ -32,7 +33,7 @@ pub func wnoise(p: f32[4]) -> Worley:
     let cz = (i64)math32.floor(p[2])
     var f1: f32 = 1.0e9
     var f2: f32 = 1.0e9
-    var seed: i32 = 0
+    var nearest: i64 = 0
     for i in 0..<27:
         let x = cx + (i64)(i % 3) - 1
         let y = cy + (i64)((i // 3) % 3) - 1
@@ -41,9 +42,10 @@ pub func wnoise(p: f32[4]) -> Worley:
         if d < f1:
             f2 = f1
             f1 = d
-            seed = (i32)(cell_bits(x, y, z, 23) >> 33)
+            nearest = (i64)i
         elif d < f2:
             f2 = d
+    let seed = (i32)(cell_bits(cx + nearest % 3 - 1, cy + (nearest // 3) % 3 - 1, cz + nearest // 9 - 1, 23) >> 33)
     return Worley(f1 = f1, f2 = f2, seed = seed)
 
 ## A random value in `[0, 1)` constant over each unit cell (MaterialX and VEX
