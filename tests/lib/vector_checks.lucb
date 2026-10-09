@@ -1,0 +1,24 @@
+# The vector functions.
+
+test "dot, cross, length and distance":
+    let a: f32[4] = [1.0, 2.0, 3.0, 0.0]
+    let b: f32[4] = [4.0, 5.0, 6.0, 0.0]
+    assert(dot(a, b) == 32.0)
+    assert(cross([1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]) == [0.0, 0.0, 1.0, 0.0])
+    assert(cross(a, b) == [-3.0, 6.0, -3.0, 0.0])
+    assert(length([3.0, 4.0, 0.0, 0.0]) == 5.0 and length2([3.0, 4.0, 0.0, 0.0]) == 25.0)
+    assert(distance([1.0, 1.0, 1.0, 0.0], [4.0, 5.0, 1.0, 0.0]) == 5.0)
+    assert(distance2([1.0, 1.0, 1.0, 0.0], [4.0, 5.0, 1.0, 0.0]) == 25.0)
+    assert(normalized([0.0, 3.0, 4.0, 0.0]) == [0.0, 0.6, 0.8, 0.0])
+    assert(normalized(f32[4](0.0)) == f32[4](0.0))
+
+test "two-lane and f64 forms":
+    assert(dot2d([1.0, 2.0], [3.0, 4.0]) == 11.0 and length2d([3.0, 4.0]) == 5.0)
+    assert(distance2d([0.0, 0.0], [3.0, 4.0]) == 5.0 and normalized2d([0.0, 2.0]) == [0.0, 1.0])
+    assert(normalized2d([0.0, 0.0]) == [0.0, 0.0])
+    let a: f64[4] = [1.0, 2.0, 3.0, 0.0]
+    let b: f64[4] = [4.0, 5.0, 6.0, 0.0]
+    assert(dot64(a, b) == 32.0 and cross64(a, b) == [-3.0, 6.0, -3.0, 0.0])
+    assert(length64([3.0, 4.0, 0.0, 0.0]) == 5.0 and length2_64([3.0, 4.0, 0.0, 0.0]) == 25.0)
+    assert(distance64(a, b) * distance64(a, b) - 27.0 < 0.000000001 and distance2_64(a, b) == 27.0)
+    assert(math.abs(normalized64([0.0, 3.0, 4.0, 0.0])[1] - 0.6) < 0.000000000001 and normalized64([0.0, 0.0, 0.0, 0.0]) == [0.0, 0.0, 0.0, 0.0])

@@ -48,12 +48,12 @@ extend Kind:
 ## A set of kinds, one bit per `Kind`: what an operation accepts.
 type Kinds = u8
 
-let floats: Kinds = 0x03
-let integers: Kinds = 0x3C
-let signed_integers: Kinds = 0x0C
-let numbers: Kinds = 0x3F
-let any_kind: Kinds = 0x7F
-let masks: Kinds = 0x40
+let float_kinds: Kinds = 0x03
+let integer_kinds: Kinds = 0x3C
+let signed_kinds: Kinds = 0x0C
+let number_kinds: Kinds = 0x3F
+let every_kind: Kinds = 0x7F
+let mask_kinds: Kinds = 0x40
 
 ## How many kinds there are.
 let kind_count: usize = 7

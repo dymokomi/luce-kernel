@@ -1,0 +1,67 @@
+# Perlin noise as VEX has it: snoise in -1..1, zero on the lattice, noise in 0..1 around
+# 0.5; f32 and f64 agree; extreme input never traps.
+
+## A point of a fixed irrational-step walk through space, so samples cover cells well.
+func walk(step: i64, dimension: i64) -> f64:
+    return (f64)step * (0.61803398875 + 0.1 * (f64)dimension) - 300.0 + 37.0 * (f64)dimension
+
+test "snoise is zero on the lattice":
+    for x: i64 in -5..<5:
+        let at = (f32)x
+        assert(snoise1(at) == 0.0 and snoise2([at, 2.0]) == 0.0)
+        assert(snoise([at, -3.0, 7.0, 0.0]) == 0.0 and snoise4([at, 1.0, 2.0, -4.0]) == 0.0)
+        assert(snoise64([(f64)x, 5.0, -2.0, 0.0]) == 0.0 and snoise1_64((f64)x) == 0.0)
+        assert(noise([at, -3.0, 7.0, 0.0]) == 0.5)
+
+test "snoise spans -1..1 in every dimension and width":
+    var low: f64[8]
+    var high: f64[8]
+    var sum: f64 = 0.0
+    let samples: i64 = 40000
+    for step: i64 in 0..<samples:
+        let x = walk(step, 0)
+        let y = walk(step, 1)
+        let z = walk(step, 2)
+        let t = walk(step, 3)
+        let values: f64[8] = [
+            (f64)snoise1((f32)x), (f64)snoise2([(f32)x, (f32)y]), (f64)snoise([(f32)x, (f32)y, (f32)z, 0.0]),
+            (f64)snoise4([(f32)x, (f32)y, (f32)z, (f32)t]), snoise1_64(x), snoise2_64([x, y]),
+            snoise64([x, y, z, 0.0]), snoise4_64([x, y, z, t]),
+        ]
+        for (at, value) in values.indexed():
+            assert(value >= -1.0 and value <= 1.0)
+            if value < low[at]: low[at] = value
+            if value > high[at]: high[at] = value
+        sum += (f64)noise([(f32)x, (f32)y, (f32)z, 0.0])
+    for at in 0..<8:
+        assert(low[at] < -0.5 and high[at] > 0.5)
+    let mean = sum / (f64)samples
+    assert(mean > 0.47 and mean < 0.53)
+
+test "noise is in 0..1 and f32 follows f64":
+    for step: i64 in 0..<5000:
+        let x = walk(step, 0) * 0.1
+        let y = walk(step, 1) * 0.1
+        let z = walk(step, 2) * 0.1
+        let unsigned_value = noise([(f32)x, (f32)y, (f32)z, 0.0])
+        assert(unsigned_value >= 0.0 and unsigned_value <= 1.0)
+        assert(noise1((f32)x) >= 0.0 and noise2([(f32)x, (f32)y]) <= 1.0 and noise4([(f32)x, (f32)y, (f32)z, 1.5]) >= 0.0)
+        assert(noise64([x, y, z, 0.0]) >= 0.0 and noise1_64(x) <= 1.0 and noise2_64([x, y]) >= 0.0 and noise4_64([x, y, z, 1.5]) <= 1.0)
+        let narrow = (f64)snoise([(f32)x, (f32)y, (f32)z, 0.0])
+        let wide = snoise64([(f64)(f32)x, (f64)(f32)y, (f64)(f32)z, 0.0])
+        assert(math.abs(narrow - wide) < 0.0005)
+
+test "noise is continuous":
+    var previous = snoise([0.3, 0.7, 0.1, 0.0])
+    for step: i64 in 1..<2000:
+        let value = snoise([0.3 + (f32)step * 0.001, 0.7, 0.1, 0.0])
+        assert(math32.abs(value - previous) < 0.02)
+        previous = value
+
+test "extreme input never traps":
+    let huge: f32[6] = [1.0e30, -1.0e30, math32.infinity, -math32.infinity, math32.nan, 3.0e9]
+    for value in huge:
+        _ = snoise([value, value, value, 0.0])
+        _ = noise4([value, 0.5, value, 0.25])
+        _ = snoise1(value)
+        _ = snoise2_64([(f64)value, 1.0e300])

@@ -4,3 +4,6 @@ lanes_binary_checks.lucb
 lanes_unary_checks.lucb
 lanes_compare_checks.lucb
 lanes_convert_checks.lucb
+features_checks.lucb
+lib_ops_checks.lucb
+verify_checks.lucb

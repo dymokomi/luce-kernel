@@ -1,0 +1,27 @@
+# Hash random numbers: in range, deterministic, and evenly spread.
+
+test "rand is in [0, 1), deterministic and seed dependent":
+    for seed: i64 in -1000..<1000:
+        let value = rand(seed)
+        assert(value >= 0.0 and value < 1.0)
+        assert(value == rand(seed))
+        let wide = rand64(seed)
+        assert(wide >= 0.0 and wide < 1.0)
+    assert(rand(1) != rand(2) and rand(0) != rand(-1))
+    let triple = rand3(42)
+    assert(triple[0] == rand(42) and triple[1] == rand_stream(42, 1) and triple[2] == rand_stream(42, 2))
+    assert(triple[0] != triple[1] and triple[1] != triple[2] and triple[3] == 0.0)
+    assert(random_bits(7, 0) == random_bits(7, 0) and random_bits(7, 0) != random_bits(7, 1))
+
+test "rand spreads evenly over ten buckets":
+    var buckets: usize[10]
+    var sum: f64 = 0.0
+    let count: i64 = 200000
+    for seed: i64 in 0..<count:
+        let value = rand(seed)
+        sum += (f64)value
+        buckets[(usize)(value * 10.0)] += 1
+    let mean = sum / (f64)count
+    assert(mean > 0.495 and mean < 0.505)
+    for filled in buckets:
+        assert(filled > 19000 and filled < 21000)

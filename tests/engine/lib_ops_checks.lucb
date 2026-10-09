@@ -1,0 +1,169 @@
+# The engine's vector, fit, noise and random operations against the `lib` functions they
+# lower from, lane for lane and bit for bit.
+
+let sample_count: usize = 24
+
+## Sample component `k` of element `e`: spread over a few noise cells, signs mixed.
+func sample(e: usize, k: usize) -> f64:
+    return (f64)((e * 7 + k * 13) % 23) * 0.37 - 4.0 + (f64)k * 0.11
+
+test "vector operations match lib in f32":
+    var a: f32[96]
+    var c: f32[96]
+    for e in 0..<sample_count:
+        for k: usize in 0..<4:
+            a[e * 4 + k] = (f32)sample(e, k) if k < 3 else 0.0
+            c[e * 4 + k] = (f32)sample(e + 5, k + 1) if k < 3 else 0.0
+    var b = Builder()
+    let x = b.vector(.f32, 4)
+    let y = b.vector(.f32, 4)
+    for k: u16 in 0..<4:
+        b.emit(.copy, .f32, x + k, b.input("a", (usize)k, .f32), 0, 0)
+        b.emit(.copy, .f32, y + k, b.input("c", (usize)k, .f32), 0, 0)
+    b.store(b.output("dot", 0, .f32), b.dot(x, y, 4))
+    b.store(b.output("dot3", 0, .f32), b.dot(x, y, 3))
+    b.store(b.output("length", 0, .f32), b.length(x, 4))
+    b.store(b.output("length2", 0, .f32), b.length2(x, 3))
+    b.store(b.output("distance", 0, .f32), b.distance(x, y, 4))
+    b.store(b.output("distance2", 0, .f32), b.distance2(x, y, 4))
+    let crossed = b.cross(x, y)
+    let normal = b.normalize(x, 4)
+    for k: u16 in 0..<3:
+        b.store(b.output("cross", (usize)k, .f32), crossed + k)
+    for k: u16 in 0..<4:
+        b.store(b.output("unit", (usize)k, .f32), normal + k)
+    var program = try b.finish()
+    defer program.destroy()
+    var dots: f32[24]
+    var dot3s: f32[24]
+    var lengths: f32[24]
+    var length2s: f32[24]
+    var distances: f32[24]
+    var distance2s: f32[24]
+    var crosses: f32[72]
+    var units: f32[96]
+    let outputs = [
+        Column.output_f32("dot", dots), Column.output_f32("dot3", dot3s), Column.output_f32("length", lengths),
+        Column.output_f32("length2", length2s), Column.output_f32("distance", distances),
+        Column.output_f32("distance2", distance2s), Column.output_f32("cross", crosses, 3), Column.output_f32("unit", units, 4),
+    ]
+    assert(try run_columns(&program, sample_count, [Column.input_f32("a", a, 4), Column.input_f32("c", c, 4)], outputs) == none)
+    for e in 0..<sample_count:
+        let p: f32[4] = [a[e * 4], a[e * 4 + 1], a[e * 4 + 2], a[e * 4 + 3]]
+        let q: f32[4] = [c[e * 4], c[e * 4 + 1], c[e * 4 + 2], c[e * 4 + 3]]
+        assert(same_f32(dots[e], lib.dot(p, q)) and same_f32(dot3s[e], lib.dot(p, q)))
+        assert(same_f32(lengths[e], lib.length(p)) and same_f32(length2s[e], lib.length2(p)))
+        assert(same_f32(distances[e], lib.distance(p, q)) and same_f32(distance2s[e], lib.distance2(p, q)))
+        let crossed_value = lib.cross(p, q)
+        let unit_value = lib.normalized(p)
+        for k: usize in 0..<3: assert(same_f32(crosses[e * 3 + k], crossed_value[k]))
+        for k: usize in 0..<4: assert(same_f32(units[e * 4 + k], unit_value[k]))
+
+test "vector operations match lib in f64":
+    var a: f64[96]
+    var c: f64[96]
+    for e in 0..<sample_count:
+        for k: usize in 0..<3:
+            a[e * 4 + k] = sample(e, k)
+            c[e * 4 + k] = sample(e + 3, k + 2)
+    var b = Builder()
+    let x = b.vector(.f64, 3)
+    let y = b.vector(.f64, 3)
+    for k: u16 in 0..<3:
+        b.emit(.copy, .f64, x + k, b.input("a", (usize)k, .f64), 0, 0)
+        b.emit(.copy, .f64, y + k, b.input("c", (usize)k, .f64), 0, 0)
+    b.store(b.output("dot", 0, .f64), b.dot(x, y, 3))
+    b.store(b.output("length", 0, .f64), b.length(x, 3))
+    b.store(b.output("distance", 0, .f64), b.distance(x, y, 3))
+    let crossed = b.cross(x, y)
+    let normal = b.normalize(x, 3)
+    for k: u16 in 0..<3:
+        b.store(b.output("cross", (usize)k, .f64), crossed + k)
+        b.store(b.output("unit", (usize)k, .f64), normal + k)
+    var program = try b.finish()
+    defer program.destroy()
+    var dots: f64[24]
+    var lengths: f64[24]
+    var distances: f64[24]
+    var crosses: f64[72]
+    var units: f64[72]
+    let outputs = [
+        Column.output_f64("dot", dots), Column.output_f64("length", lengths), Column.output_f64("distance", distances),
+        Column.output_f64("cross", crosses, 3), Column.output_f64("unit", units, 3),
+    ]
+    assert(try run_columns(&program, sample_count, [Column.input_f64("a", a, 4), Column.input_f64("c", c, 4)], outputs) == none)
+    for e in 0..<sample_count:
+        let p: f64[4] = [a[e * 4], a[e * 4 + 1], a[e * 4 + 2], 0.0]
+        let q: f64[4] = [c[e * 4], c[e * 4 + 1], c[e * 4 + 2], 0.0]
+        assert(same_f64(dots[e], lib.dot64(p, q)) and same_f64(lengths[e], lib.length64(p)))
+        assert(same_f64(distances[e], lib.distance64(p, q)))
+        let crossed_value = lib.cross64(p, q)
+        let unit_value = lib.normalized64(p)
+        for k: usize in 0..<3:
+            assert(same_f64(crosses[e * 3 + k], crossed_value[k]) and same_f64(units[e * 3 + k], unit_value[k]))
+
+test "noise operations match lib in 1 to 4 dimensions and both widths":
+    var points32: f32[96]
+    var points64: f64[96]
+    for e in 0..<sample_count:
+        for k: usize in 0..<4:
+            points64[e * 4 + k] = sample(e, k) * 0.7
+            points32[e * 4 + k] = (f32)(sample(e, k) * 0.7)
+    var b = Builder()
+    let narrow = b.vector(.f32, 4)
+    let wide = b.vector(.f64, 4)
+    for k: u16 in 0..<4:
+        b.emit(.copy, .f32, narrow + k, b.input("p32", (usize)k, .f32), 0, 0)
+        b.emit(.copy, .f64, wide + k, b.input("p64", (usize)k, .f64), 0, 0)
+    for dimensions: usize in 1..<5:
+        b.store(b.output("n32", dimensions - 1, .f32), b.noise(narrow, dimensions))
+        b.store(b.output("s32", dimensions - 1, .f32), b.snoise(narrow, dimensions))
+        b.store(b.output("n64", dimensions - 1, .f64), b.noise(wide, dimensions))
+        b.store(b.output("s64", dimensions - 1, .f64), b.snoise(wide, dimensions))
+    var program = try b.finish()
+    defer program.destroy()
+    var n32: f32[96]
+    var s32: f32[96]
+    var n64: f64[96]
+    var s64: f64[96]
+    let outputs = [Column.output_f32("n32", n32, 4), Column.output_f32("s32", s32, 4), Column.output_f64("n64", n64, 4), Column.output_f64("s64", s64, 4)]
+    assert(try run_columns(&program, sample_count, [Column.input_f32("p32", points32, 4), Column.input_f64("p64", points64, 4)], outputs) == none)
+    for e in 0..<sample_count:
+        let p: f32[4] = [points32[e * 4], points32[e * 4 + 1], points32[e * 4 + 2], points32[e * 4 + 3]]
+        let q: f64[4] = [points64[e * 4], points64[e * 4 + 1], points64[e * 4 + 2], points64[e * 4 + 3]]
+        let at = e * 4
+        assert(same_f32(n32[at], lib.noise1(p[0])) and same_f32(s32[at], lib.snoise1(p[0])))
+        assert(same_f32(n32[at + 1], lib.noise2([p[0], p[1]])) and same_f32(s32[at + 1], lib.snoise2([p[0], p[1]])))
+        assert(same_f32(n32[at + 2], lib.noise([p[0], p[1], p[2], 0.0])) and same_f32(s32[at + 2], lib.snoise([p[0], p[1], p[2], 0.0])))
+        assert(same_f32(n32[at + 3], lib.noise4(p)) and same_f32(s32[at + 3], lib.snoise4(p)))
+        assert(same_f64(n64[at], lib.noise1_64(q[0])) and same_f64(s64[at], lib.snoise1_64(q[0])))
+        assert(same_f64(n64[at + 1], lib.noise2_64([q[0], q[1]])) and same_f64(s64[at + 1], lib.snoise2_64([q[0], q[1]])))
+        assert(same_f64(n64[at + 2], lib.noise64([q[0], q[1], q[2], 0.0])) and same_f64(s64[at + 2], lib.snoise64([q[0], q[1], q[2], 0.0])))
+        assert(same_f64(n64[at + 3], lib.noise4_64(q)) and same_f64(s64[at + 3], lib.snoise4_64(q)))
+
+test "rand and fit match lib":
+    var b = Builder()
+    let seed = b.cast(b.index(.i32), .i64)
+    for stream: u16 in 0..<3:
+        b.store(b.output("r32", (usize)stream, .f32), b.rand(seed, .f32, stream))
+        b.store(b.output("r64", (usize)stream, .f64), b.rand(seed, .f64, stream))
+    let x = b.input("x", 0, .f32)
+    b.store(b.output("fit", 0, .f32), b.fit(x, b.constant_f32(-1.0), b.constant_f32(3.0), b.constant_f32(10.0), b.constant_f32(20.0)))
+    let wide = b.cast(x, .f64)
+    b.store(b.output("fit64", 0, .f64), b.fit(wide, b.constant_f64(3.0), b.constant_f64(-1.0), b.constant_f64(0.0), b.constant_f64(1.0)))
+    var program = try b.finish()
+    defer program.destroy()
+    var xs: f32[24]
+    for e in 0..<sample_count: xs[e] = (f32)sample(e, 0)
+    var r32: f32[72]
+    var r64: f64[72]
+    var fits: f32[24]
+    var fit64s: f64[24]
+    let outputs = [Column.output_f32("r32", r32, 3), Column.output_f64("r64", r64, 3), Column.output_f32("fit", fits), Column.output_f64("fit64", fit64s)]
+    assert(try run_columns(&program, sample_count, [Column.input_f32("x", xs)], outputs) == none)
+    for e in 0..<sample_count:
+        for stream: u32 in 0..<3:
+            assert(r32[e * 3 + (usize)stream] == lib.rand_stream((i64)e, stream))
+            assert(r64[e * 3 + (usize)stream] == lib.rand_stream64((i64)e, stream))
+        assert(same_f32(fits[e], lib.fit(xs[e], -1.0, 3.0, 10.0, 20.0)))
+        assert(same_f64(fit64s[e], lib.fit64((f64)xs[e], 3.0, -1.0, 0.0, 1.0)))

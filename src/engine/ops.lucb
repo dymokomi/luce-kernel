@@ -209,17 +209,17 @@ extend Op:
     ## The kinds the instruction's `kind` may be.
     func kinds() -> Kinds:
         return match self:
-            .copy, .assign, .select, .pick, .place, .store, .cast => any_kind
-            .index => integers
-            .add, .sub, .mul, .min, .max, .clamp => numbers
-            .wadd, .wsub, .wmul, .sadd, .ssub, .smul, .idiv, .rem, .shl, .shr, .wneg => integers
-            .band, .bor, .bxor, .bnot => integers | masks
-            .neg, .abs => floats | signed_integers
-            .eq, .ne => numbers | masks
-            .lt, .le, .gt, .ge, .convert => numbers
-            .jump, .jump_if_true, .jump_if_false, .jump_if_any, .jump_if_none => any_kind
-            .exec, .exec_all, .loop_start, .loop_step, .check, .trap, .call => any_kind
-            _ => floats
+            .copy, .assign, .select, .pick, .place, .store, .cast => every_kind
+            .index => integer_kinds
+            .add, .sub, .mul, .min, .max, .clamp => number_kinds
+            .wadd, .wsub, .wmul, .sadd, .ssub, .smul, .idiv, .rem, .shl, .shr, .wneg => integer_kinds
+            .band, .bor, .bxor, .bnot => integer_kinds | mask_kinds
+            .neg, .abs => float_kinds | signed_kinds
+            .eq, .ne => number_kinds | mask_kinds
+            .lt, .le, .gt, .ge, .convert => number_kinds
+            .jump, .jump_if_true, .jump_if_false, .jump_if_any, .jump_if_none => every_kind
+            .exec, .exec_all, .loop_start, .loop_step, .check, .trap, .call => every_kind
+            _ => float_kinds
 
     ## Whether the operation reads its destination (a masked write keeps inactive lanes).
     func reads_destination() -> bool:

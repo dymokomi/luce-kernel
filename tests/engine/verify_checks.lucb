@@ -1,0 +1,157 @@
+# `verify` refuses every program the interpreter could not run safely; `finish` reports it.
+
+## Whether `finish` refuses the builder's program as bad.
+func rejected(b: Builder*) -> bool:
+    var program = b.finish() catch failure:
+        b.destroy()
+        return failure.code == bad_program
+    program.destroy()
+    return false
+
+test "a well-formed program is accepted and listed":
+    var b = Builder()
+    b.at(3, 5)
+    b.store(b.output("y", 0, .f32), b.unary(.sqrt, b.input("x", 0, .f32)))
+    var program = try b.finish()
+    defer program.destroy()
+    assert(program.is_verified() and program.register_count() == 2)
+    assert(program.instructions().length == 2 and program.instructions()[0].op == .sqrt)
+    let source = program.source(0) else trap("no source")
+    assert(source.line == 3 and source.column == 5 and program.source(2) == none)
+    assert(program.inputs()[0].name == "x" and program.outputs()[0].name == "y")
+    assert(program.kind(1) == .f32 and program.kind(9) == none and Op.sqrt.name() == "sqrt")
+
+test "operands of the wrong kind":
+    var b = Builder()
+    _ = b.binary(.add, b.input("x", 0, .f32), b.input("n", 0, .i32))
+    assert(rejected(&b))
+    var c = Builder()
+    _ = c.binary(.div, c.input("n", 0, .i32), c.input("m", 0, .i32))
+    assert(rejected(&c))
+    var d = Builder()
+    d.exec(d.input("x", 0, .f32))
+    assert(rejected(&d))
+    var e = Builder()
+    _ = e.convert(e.input("m", 0, .mask), .i32)
+    assert(rejected(&e))
+    var f = Builder()
+    f.store(f.output("y", 0, .f64), f.input("x", 0, .f32))
+    assert(rejected(&f))
+
+test "registers that do not exist or overlap":
+    var b = Builder()
+    b.emit(.copy, .f32, 999, b.input("x", 0, .f32), 0, 0)
+    assert(rejected(&b))
+    var c = Builder()
+    let v = c.vector(.f32, 4)
+    for k: u16 in 0..<4: c.emit(.copy, .f32, v + k, c.input("x", 0, .f32), 0, 0)
+    c.emit(.normalize, .f32, v + 1, v, 0, 4)
+    assert(rejected(&c))
+    var d = Builder()
+    let w = d.vector(.f32, 4)
+    for k: u16 in 0..<4: d.emit(.copy, .f32, w + k, d.input("x", 0, .f32), 0, 0)
+    d.emit(.dot, .f32, d.register(.f32), w, w, 5)
+    assert(rejected(&d))
+    var e = Builder()
+    e.store(7, e.input("x", 0, .f32))
+    assert(rejected(&e))
+
+test "writes to registers the run fills":
+    var b = Builder()
+    let x = b.input("x", 0, .f32)
+    b.emit(.copy, .f32, x, b.constant_f32(1.0), 0, 0)
+    assert(rejected(&b))
+    var c = Builder()
+    let one = c.constant_f32(1.0)
+    c.assign(one, c.input("x", 0, .f32))
+    assert(rejected(&c))
+
+test "a register read before it is written on every path":
+    var b = Builder()
+    let y = b.register(.f32)
+    b.store(b.output("y", 0, .f32), y)
+    assert(rejected(&b))
+    var c = Builder()
+    let flag = c.uniform_mask("flag", true)
+    let value = c.register(.f32)
+    let skip = c.label()
+    c.jump_if_false(flag, skip)
+    c.emit(.copy, .f32, value, c.constant_f32(1.0), 0, 0)
+    c.bind(skip)
+    c.store(c.output("y", 0, .f32), value)
+    assert(rejected(&c))
+
+test "loops that could spin forever":
+    # A back edge with no loop_step before it.
+    var b = Builder()
+    let top = b.label()
+    b.bind(top)
+    b.jump(top)
+    assert(rejected(&b))
+    # A jump straight onto a back edge, skipping its loop_step.
+    var c = Builder()
+    let slot = c.loop_slot()
+    let head = c.label()
+    let latch = c.label()
+    c.loop_start(slot)
+    c.bind(head)
+    c.jump(latch)
+    c.loop_step(slot, no_register)
+    c.bind(latch)
+    c.jump(head)
+    assert(rejected(&c))
+    # A loop that restarts its own count every round.
+    var d = Builder()
+    let again = d.loop_slot()
+    let start = d.label()
+    d.bind(start)
+    d.loop_start(again)
+    d.loop_step(again, no_register)
+    d.jump(start)
+    assert(rejected(&d))
+    # A jump into the middle of a loop.
+    var e = Builder()
+    let round = e.loop_slot()
+    let entry = e.label()
+    let middle = e.label()
+    e.loop_start(round)
+    e.jump(middle)
+    e.bind(entry)
+    e.exec_all()
+    e.bind(middle)
+    e.exec_all()
+    e.loop_step(round, no_register)
+    e.jump(entry)
+    assert(rejected(&e))
+
+test "labels and builder mistakes":
+    var b = Builder()
+    b.jump(b.label())
+    assert(rejected(&b))
+    var c = Builder()
+    let twice = c.label()
+    c.bind(twice)
+    c.bind(twice)
+    assert(c.has_failed() and rejected(&c))
+    var d = Builder()
+    d.emit(.jump, .mask, 0, 0, 0, 0)
+    assert(rejected(&d))
+    var e = Builder()
+    _ = e.binary(.add, 42, 43)
+    assert(rejected(&e))
+    var f = Builder()
+    _ = f.uniform_f32("a", 1.0)
+    _ = f.uniform_i32("a", 1)
+    assert(rejected(&f))
+
+test "an unverified program does not run":
+    var program = Program()
+    defer program.destroy()
+    var refused_run = false
+    _ = run_columns(&program, 1, no_uniforms_columns(), no_uniforms_columns()) catch failure:
+        refused_run = failure.code == bad_program
+    assert(refused_run)
+
+func no_uniforms_columns() -> const Column[]:
+    var none_given: const Column[]
+    return none_given

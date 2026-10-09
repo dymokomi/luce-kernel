@@ -1,0 +1,28 @@
+# VEX-compatible values of the interpolation functions.
+
+func near32(x: f32, y: f32) -> bool:
+    return math32.abs(x - y) <= 0.000001 * (1.0 + math32.abs(y))
+
+func near64(x: f64, y: f64) -> bool:
+    return math.abs(x - y) <= 0.000000000001 * (1.0 + math.abs(y))
+
+test "lerp and clamp":
+    assert(lerp(2.0, 4.0, 0.25) == 2.5 and lerp64(2.0, 4.0, 0.25) == 2.5)
+    assert(lerp(2.0, 4.0, 1.5) == 5.0)
+    assert(clamp(5.0, 0.0, 1.0) == 1.0 and clamp(-5.0, 0.0, 1.0) == 0.0 and clamp(0.5, 0.0, 1.0) == 0.5)
+    assert(clamp64(5.0, 0.0, 1.0) == 1.0 and clamp64(-5.0, 0.0, 1.0) == 0.0)
+    assert(math32.is_nan(clamp(math32.nan, 0.0, 1.0)))
+
+test "fit, fit01 and smooth as in VEX":
+    assert(fit(0.5, 0.0, 1.0, 10.0, 20.0) == 15.0)
+    assert(fit(2.0, 0.0, 1.0, 10.0, 20.0) == 20.0 and fit(-2.0, 0.0, 1.0, 10.0, 20.0) == 10.0)
+    assert(fit(0.25, 1.0, 0.0, 0.0, 10.0) == 7.5)
+    assert(fit(3.0, 1.0, 1.0, 4.0, 8.0) == 4.0)
+    assert(fit64(0.5, 0.0, 2.0, 0.0, 1.0) == 0.25)
+    assert(fit01(0.5, 2.0, 4.0) == 3.0 and fit01(7.0, 2.0, 4.0) == 4.0 and fit01_64(-1.0, 2.0, 4.0) == 2.0)
+    assert(smooth(0.0, 1.0, 0.5) == 0.5 and smooth(0.0, 1.0, -1.0) == 0.0 and smooth(0.0, 1.0, 2.0) == 1.0)
+    assert(near32(smooth(0.0, 2.0, 0.5), 0.15625) and near64(smooth64(0.0, 2.0, 0.5), 0.15625))
+
+test "degrees and radians":
+    assert(near32(degrees(math32.pi), 180.0) and near32(radians(90.0), math32.pi / 2.0))
+    assert(near64(degrees64(math.pi), 180.0) and near64(radians64(90.0), math.pi / 2.0))
