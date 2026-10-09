@@ -1,0 +1,105 @@
+## The benchmark snippets against the same computation in plain Base, bit for bit, at
+## every worker count and chunk size.
+import memory
+from luce_std import math32
+from luce_kernel import engine, lib
+from luce_kernel.engine import Column, Request, Uniform, Program
+import common
+import snippets
+
+let points: usize = 50000
+
+## Interleaved positions on a grid with a little height, and up normals.
+pub struct Points:
+    pub var positions: f32[]
+    pub var normals: f32[]
+    pub var written: f32[]
+
+    pub static func make(count: usize) -> Points!:
+        let positions = try new f32[count * 3] --- in memory.heap
+        let normals = try new f32[count * 3] --- in memory.heap
+        let written = try new f32[count * 3] --- in memory.heap
+        for at in 0..<count:
+            positions[at * 3] = (f32)(at % 1000) * 0.01
+            positions[at * 3 + 1] = (f32)(at % 7) * 0.125 - 0.25
+            positions[at * 3 + 2] = (f32)(at // 1000) * 0.01
+            normals[at * 3] = 0.0
+            normals[at * 3 + 1] = 1.0
+            normals[at * 3 + 2] = 0.0
+        return Points(positions = positions, normals = normals, written = written)
+
+    pub func release():
+        free(self.positions) in memory.heap
+        free(self.normals) in memory.heap
+        free(self.written) in memory.heap
+
+## Run `program` over `set` at every thread count and chunk size, the output starting as
+## a copy of P each time, and check every output value with `expected`.
+func check(name: str, program: const Program*, set: Points*, uniforms: const Uniform[], expected: func(const Points*, usize, usize) -> f32) -> !:
+    let count = set.positions.length // 3
+    for threads in common.thread_counts:
+        for chunk in common.chunk_sizes:
+            memory.copy(set.written, set.positions, set.positions.length)
+            let inputs = [Column.input_f32("P", set.positions, 3), Column.input_f32("N", set.normals, 3)]
+            let outputs = [Column.output_f32("P", set.written, 3), Column.output_f32("Cd", set.written, 3)]
+            let request = Request(count = count, inputs = inputs, outputs = outputs, uniforms = uniforms, threads = threads, chunk = chunk)
+            if let fault = try engine.run(program, &request):
+                print(f"FAIL  {name}: faulted at {fault.lane}")
+                trap("conformance")
+            for at in 0..<count:
+                for k: usize in 0..<3:
+                    let want = expected(set, at, k)
+                    let got = set.written[at * 3 + k]
+                    if got.bits() != want.bits():
+                        print(f"FAIL  {name}: point {at} component {k}: {got} for {want} ({threads} workers, chunks of {chunk})")
+                        trap("conformance")
+    print(f"ok    snippet {name}")
+
+func wave_value(set: const Points*, at: usize, k: usize) -> f32:
+    let x = set.positions[at * 3]
+    let value = set.positions[at * 3 + k]
+    return value + math32.sin(x * 4.0) * 0.1 if k == 1 else value
+
+func displace_value(set: const Points*, at: usize, k: usize) -> f32:
+    let p = set.positions[at * 3..<at * 3 + 3]
+    let n = lib.snoise([p[0] * 3.0, p[1] * 3.0, p[2] * 3.0 + (f32)0.5, 0.0])
+    return p[k] + set.normals[at * 3 + k] * (n * 0.2)
+
+func color_value(set: const Points*, at: usize, k: usize) -> f32:
+    _ = set
+    return lib.rand3((i64)(i32)at)[k]
+
+func empty_value(set: const Points*, at: usize, k: usize) -> f32:
+    return set.positions[at * 3 + k]
+
+func split_value(set: const Points*, at: usize, k: usize) -> f32:
+    let right = set.positions[at * 3] > 5.0
+    return 1.0 if (right and k == 0) or (not right and k == 2) else 0.0
+
+func steps_value(set: const Points*, at: usize, k: usize) -> f32:
+    var value = set.positions[at * 3 + k]
+    if k == 1:
+        for _ in 0..<3: value = value + 0.25
+    return value
+
+pub func run_all() -> !:
+    var set = try Points.make(points)
+    defer set.release()
+    var program = try snippets.wave()
+    try check("wave", &program, &set, common.no_uniforms(), wave_value)
+    program.destroy()
+    program = try snippets.displace()
+    try check("noise displacement", &program, &set, [Uniform.f64("time", 0.5)], displace_value)
+    program.destroy()
+    program = try snippets.colors()
+    try check("rand3", &program, &set, common.no_uniforms(), color_value)
+    program.destroy()
+    program = try snippets.empty()
+    try check("empty", &program, &set, common.no_uniforms(), empty_value)
+    program.destroy()
+    program = try snippets.split()
+    try check("masked if/else", &program, &set, common.no_uniforms(), split_value)
+    program.destroy()
+    program = try snippets.steps()
+    try check("uniform loop", &program, &set, [Uniform.i32("steps", 3)], steps_value)
+    program.destroy()

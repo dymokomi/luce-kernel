@@ -1,0 +1,95 @@
+## The Code node's benchmark snippets, lowered by hand with the IR builder as the lowering
+## will lower them. Points carry interleaved f32 "P" and "N" (three components each).
+from luce_kernel.engine import Builder, Program
+
+## `p.P[1] += math32.sin(p.P[0] * 4.0) * 0.1`
+pub func wave() -> Program!:
+    var b = Builder()
+    b.at(1, 1)
+    let x = b.input("P", 0, .f32)
+    let y = b.input("P", 1, .f32)
+    let sine = b.unary(.sin, b.binary(.mul, x, b.constant_f32(4.0)))
+    b.store(b.output("P", 1, .f32), b.binary(.add, y, b.binary(.mul, sine, b.constant_f32(0.1))))
+    return try b.finish()
+
+## let amount = k.f32("amount", 0.2)
+## let scale = k.f32("scale", 3.0)
+## let n = snoise(p.P * scale + [0.0, 0.0, (f32)k.time, 0.0])
+## p.P = p.P + p.N * (n * amount)
+pub func displace() -> Program!:
+    var b = Builder()
+    b.at(1, 1)
+    let amount = b.uniform_f32("amount", 0.2)
+    b.at(2, 1)
+    let scale = b.uniform_f32("scale", 3.0)
+    b.at(3, 1)
+    let clock = b.cast(b.uniform_f64("time", 0.0), .f32)
+    let point = b.vector(.f32, 3)
+    for k: u16 in 0..<3:
+        let scaled = b.binary(.mul, b.input("P", (usize)k, .f32), scale)
+        b.emit(.copy, .f32, point + k, b.binary(.add, scaled, clock) if k == 2 else scaled, 0, 0)
+    let n = b.snoise(point, 3)
+    b.at(4, 1)
+    let along = b.binary(.mul, n, amount)
+    for k: u16 in 0..<3:
+        let moved = b.binary(.add, b.input("P", (usize)k, .f32), b.binary(.mul, b.input("N", (usize)k, .f32), along))
+        b.store(b.output("P", (usize)k, .f32), moved)
+    return try b.finish()
+
+## `p.Cd = rand3(p.ptnum)`
+pub func colors() -> Program!:
+    var b = Builder()
+    b.at(1, 1)
+    let seed = b.cast(b.index(.i32), .i64)
+    for k: u16 in 0..<3:
+        b.store(b.output("Cd", (usize)k, .f32), b.rand(seed, .f32, k))
+    return try b.finish()
+
+## An empty point snippet: P bound and written back.
+pub func empty() -> Program!:
+    var b = Builder()
+    for k: usize in 0..<3:
+        b.store(b.output("P", k, .f32), b.input("P", k, .f32))
+    return try b.finish()
+
+## if p.P[0] > 5.0: p.Cd = [1.0, 0.0, 0.0, 0.0]
+## else: p.Cd = [0.0, 0.0, 1.0, 0.0]
+pub func split() -> Program!:
+    var b = Builder()
+    b.at(1, 1)
+    let right = b.compare(.gt, b.input("P", 0, .f32), b.constant_f32(5.0))
+    let color = b.vector(.f32, 3)
+    for k: u16 in 0..<3:
+        b.emit(.copy, .f32, color + k, b.constant_f32(0.0), 0, 0)
+    b.exec(right)
+    b.at(2, 5)
+    b.assign(color, b.constant_f32(1.0))
+    b.exec(b.unary(.bnot, right))
+    b.at(4, 5)
+    b.assign(color + 2, b.constant_f32(1.0))
+    b.exec_all()
+    for k: u16 in 0..<3:
+        b.store(b.output("Cd", (usize)k, .f32), color + k)
+    return try b.finish()
+
+## for i in 0..<k.i32("steps", 4): p.P[1] += 0.25
+pub func steps() -> Program!:
+    var b = Builder()
+    b.at(1, 1)
+    let count = b.uniform_i32("steps", 4)
+    let slot = b.loop_slot()
+    let i = b.copy(b.constant_i32(0))
+    let y = b.copy(b.input("P", 1, .f32))
+    let top = b.label()
+    let done = b.label()
+    b.loop_start(slot)
+    b.bind(top)
+    b.jump_if_false(b.compare(.lt, i, count), done)
+    b.at(2, 5)
+    b.assign(y, b.binary(.add, y, b.constant_f32(0.25)))
+    b.assign(i, b.binary(.add, i, b.constant_i32(1)))
+    b.loop_step(slot, b.constant_mask(true))
+    b.jump(top)
+    b.bind(done)
+    b.store(b.output("P", 1, .f32), y)
+    return try b.finish()

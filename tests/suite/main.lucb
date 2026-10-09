@@ -1,8 +1,14 @@
 ## luce-kernel's heavier checks, run by `luc test` as a program: the fault suite, the
-## benchmark snippets against scalar Base, the fuzzer, and allocation failures.
+## benchmark snippets against plain Base, the fuzzer, and allocation failures.
+## `--bench` runs the benchmarks instead (tests/bench/run.py).
+import bench
+import conformance
 import faults
 
 pub func main(arguments: str[]) -> i32!:
-    _ = arguments
+    if arguments.length > 1 and arguments[1] == "--bench":
+        try bench.run_all()
+        return 0
     try faults.run_all()
+    try conformance.run_all()
     return 0

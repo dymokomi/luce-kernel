@@ -1,0 +1,51 @@
+## The Code node's Stage 1 benchmarks over 1M points: each snippet's run (best of five),
+## on one thread and on the pool, plus the host's copy of P into the output that a whole
+## cook adds. Prints `name<TAB>threads<TAB>milliseconds` lines; tests/bench/run.py builds
+## this program with --opt 3 and makes the table.
+import memory
+import time
+from luce_kernel import engine
+from luce_kernel.engine import Column, Request, Uniform, Program
+import conformance
+import snippets
+
+let points: usize = 1000000
+
+func measure(name: str, program: const Program*, request: const Request*) -> !:
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        if let fault = try engine.run(program, request):
+            print(f"{name} faulted at {fault.lane}")
+            return
+        let spent = time.since(started)
+        if spent < best: best = spent
+    print(f"{name}\t{request.threads}\t{(f64)best / 1000000.0}")
+
+pub func run_all() -> !:
+    var set = try conformance.Points.make(points)
+    defer set.release()
+    var wave = try snippets.wave()
+    defer wave.destroy()
+    var displace = try snippets.displace()
+    defer displace.destroy()
+    var colors = try snippets.colors()
+    defer colors.destroy()
+    var empty = try snippets.empty()
+    defer empty.destroy()
+    let inputs = [Column.input_f32("P", set.positions, 3), Column.input_f32("N", set.normals, 3)]
+    let outputs = [Column.output_f32("P", set.written, 3), Column.output_f32("Cd", set.written, 3)]
+    let uniforms = [Uniform.f64("time", 0.5)]
+    for threads in [(usize)1, 0]:
+        let request = Request(count = points, inputs = inputs, outputs = outputs, uniforms = uniforms, threads = threads)
+        try measure("wave", &wave, &request)
+        try measure("noise displacement", &displace, &request)
+        try measure("rand3", &colors, &request)
+        try measure("empty", &empty, &request)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        memory.copy(set.written, set.positions, set.positions.length)
+        let spent = time.since(started)
+        if spent < best: best = spent
+    print(f"copy of P\t1\t{(f64)best / 1000000.0}")
