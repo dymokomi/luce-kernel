@@ -1,0 +1,184 @@
+# Compiling a snippet: wrap it, check it with the Base checker, lower the entry function,
+# and say every problem at the user's line and column.
+
+## How much a diagnostic matters.
+pub enum Severity:
+    error
+    warning
+    note
+
+## A problem with the snippet, at a line and column (1-based, the column in bytes) of the
+## part of the node's text it is in.
+pub struct Diagnostic:
+    pub let severity: Severity
+    pub let part: Part
+    pub let line: u32
+    pub let column: u32
+    pub let message: str
+
+## A compiled snippet: the program when it checked and lowered, the diagnostics either way.
+## Fault positions of the program are lines of the wrapped module: `locate` maps them to
+## the user's text.
+pub struct Compiled:
+    pub var program: Program
+    var said: collections.List[Diagnostic]
+    var texts: collections.TextPool
+    var wrapped: Wrapped
+
+    ## Whether there is a program to run.
+    pub func ok() -> bool:
+        return self.program.is_verified()
+
+    ## Errors, notes and warnings, in the order they were said.
+    pub func diagnostics() -> const Diagnostic[]:
+        return self.said.view()
+
+    ## Where a fault's line and column are in the user's text.
+    pub func locate(line: u32, column: u32) -> (Part, u32, u32):
+        return self.wrapped.locate(line, column)
+
+    ## The module text the checker saw.
+    pub func text() -> str:
+        return self.wrapped.text()
+
+    ## Give back the program, the diagnostics and the text.
+    pub func destroy():
+        self.program.destroy()
+        self.said.destroy()
+        self.texts.destroy()
+        self.wrapped.destroy()
+
+    func add(severity: Severity, part: Part, line: u32, column: u32, message: str) -> !:
+        let kept = try self.texts.keep_text(message.bytes)
+        try self.said.append(Diagnostic(severity = severity, part = part, line = line, column = column, message = kept))
+
+## Checks share the checker's process-wide state, so they take turns.
+var check_lock: sync.Mutex
+## The standard library, checked once (about 11 ms) and kept for every later check (about
+## 0.1 ms each); under `check_lock`.
+var library: embed.Library?
+
+## The module name of the snippet in a root.
+let snippet_module: str = "snippet"
+
+## Check and lower `body` (with the helper functions and constants of `header`) for
+## `run_over`, in `root` (prepared by `write_root` and the host's stubs). The snippet is
+## written to `root/snippet.lucb`; keep one root for the process, since the checker
+## remembers the paths it resolved. The first call checks the standard library and keeps
+## it. Fails only when memory or the disk does; a snippet the checker or the lowering
+## refuses comes back with diagnostics and no program.
+pub func compile(root: str, run_over: RunOver, header: str, body: str, host: const Host*) -> Compiled!:
+    var compiled = Compiled(wrapped = try wrap(run_over, header, body))
+    errdefer compiled.destroy()
+    check_lock.lock()
+    defer check_lock.unlock()
+    try write_text(root, "snippet.lucb", compiled.wrapped.text())
+    if library == none:
+        library = try embed.Library.create()
+    var kept = library else return compiled
+    var result = try kept.check(root, snippet_module)
+    defer result.close()
+    for d in result.diagnostics:
+        try add_checked(&compiled, d)
+    if not result.ok():
+        return compiled
+    let tree = result.tree else return compiled
+    let snippet = result.checker.find_module(snippet_module) else return compiled
+    let entry = check.find_decl(tree, run_over.entry) else return compiled
+    try lower_entry(&result.checker, snippet, entry, host, &compiled)
+    return compiled
+
+## Give back the standard library `compile` keeps (at exit, or to free its memory); the
+## next `compile` checks it again.
+pub func release_library():
+    check_lock.lock()
+    defer check_lock.unlock()
+    if let kept = library:
+        var held = kept
+        held.close()
+    library = none
+
+## A checker diagnostic at the user's position; the generated lines' warnings (the free
+## imports a snippet did not use) are dropped.
+func add_checked(compiled: Compiled*, d: embed.Diagnostic) -> !:
+    let severity: Severity = match d.severity:
+        .error => Severity.error
+        .note => Severity.note
+        _ => Severity.warning
+    if d.file != "snippet.lucb":
+        if severity != .warning:
+            var room: u8[600]
+            let text = strings.format(room, f"{d.file}:{d.line}:{d.column}: {d.message}") else d.message
+            try compiled.add(severity, .wrapper, 0, 0, text)
+        return
+    let (part, line, column) = compiled.wrapped.locate(d.line, d.column)
+    if part == .wrapper and severity == .warning:
+        return
+    try compiled.add(severity, part, line, column, d.message)
+
+## Lower `entry` into `compiled.program`, or say why not.
+func lower_entry(checker: const check.Checker*, snippet: usize, entry: ast.Node*, host: const Host*, compiled: Compiled*) -> !:
+    var lowerer = Lowerer(c = checker, host = host, b = Builder(), snippet = snippet)
+    defer lowerer.destroy()
+    lowerer.entry(entry) catch failure:
+        if not lowerer.failed:
+            error(failure.code, failure.message)
+        let m = checker.modules.get(snippet)
+        let (file, line, column) = m.src.located(lowerer.failure_offset)
+        _ = file
+        let (part, user_line, user_column) = compiled.wrapped.locate(line, column)
+        try compiled.add(.error, part, user_line, user_column, lowerer.failure)
+        return
+    compiled.program = lowerer.b.finish() catch failure:
+        var room: u8[400]
+        let text = strings.format(room, f"internal: the lowered program was refused: {failure.message}") else "internal error"
+        try compiled.add(.error, .wrapper, 0, 0, text)
+        return
+
+extend Lowerer:
+    ## The entry function: its API and element-number parameters, the columns it reads and
+    ## writes, its body, and the stores of every written column lane at the end.
+    func entry(decl: ast.Node*) -> !:
+        var parameters = decl.right
+        while let parameter = parameters:
+            if self.api_type(parameter.type_id) == none and scalar_kind(parameter.type_id) == none:
+                try self.fail(parameter, "an entry parameter that is neither an API value nor the element's number")
+            parameters = parameter.next
+        let body = decl.body else return
+        try self.functions.append(Function(decl = decl, live = no_register, result = self.nothing(), has_result = false))
+        try self.scan_function(body.body)
+        try self.bind_columns(decl)
+        if has_early_return(body.body, 0):
+            var function = self.functions.at(0)
+            function.live = self.b.register(.mask)
+            self.b.emit(.copy, .mask, function.live, self.b.constant_mask(true), 0, 0)
+            self.functions.set(0, function)
+            try self.push_frame(function.live)
+        try self.statements(body.body)
+        self.frames.clear()
+        self.exec_dirty = true
+        self.sync()
+        for column in self.columns.view():
+            for k in 0..<column.components:
+                if column.written[k]:
+                    self.b.store(self.b.output(column.name, k, column.kind), column.value.lanes[k])
+
+    ## Each column's starting value: the input's lanes (lanes past its components read 0),
+    ## or 0 for a column the input lacks; registers of its own when written in a branch.
+    func bind_columns(decl: ast.Node*) -> !:
+        for at in 0..<self.columns.length():
+            var use = self.columns.at(at)
+            var present = true
+            if self.host.known_columns:
+                present = self.host.input_column(use.name) != none
+            if use.read and not present:
+                var room: u8[300]
+                let text = strings.format(room, f"the input has no column `{use.name}`") else "a column the input lacks"
+                try self.fail(use.first_use else decl, text)
+            var value = self.zero(use.kind, use.width, use.type_id)
+            value.uniform = false
+            if present:
+                for k in 0..<use.components:
+                    value.lanes[k] = self.b.input(use.name, k, use.kind)
+            use.value = self.copied(value) if use.pinned else value
+            self.columns.set(at, use)

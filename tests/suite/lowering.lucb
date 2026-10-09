@@ -1,0 +1,247 @@
+## The lowering: snippets as a user types them, wrapped, checked by the Base checker,
+## lowered and run over a few points; and the diagnostics of snippets it refuses.
+import memory
+import strings
+from io import path
+from luce_std import math32
+from luce_kernel import engine, lib, lower
+from luce_kernel.engine import Builtin, Call, Column, Request, Uniform
+from luce_kernel.lower import Host, RunOver, Compiled
+import common
+
+## The test host's API stubs, as luce-geocore's `code` module will look.
+let stubs: str = "## Test API.\npub struct Point:\n    pub var P: f32[4]\n    pub var N: f32[4]\n    pub var Cd: f32[4]\n    pub let ptnum: i32\n    pub let numpt: i32\n\n    pub func f32(name: str) -> f32:\n        _ = name\n        return 0.0\n\n    pub func set_f32(name: str, value: f32):\n        _ = name\n        _ = value\n\n    pub func vec3(name: str) -> f32[4]:\n        _ = name\n        return f32[4](0.0)\n\n    pub func area() -> f32:\n        return 0.0\n\npub struct Kernel:\n    pub let time: f64\n\n    pub func f32(name: str, default: f32 = 0.0) -> f32:\n        _ = name\n        return default\n\n    pub func i32(name: str, default: i32 = 0) -> i32:\n        _ = name\n        return default\n"
+
+let points: usize = 64
+
+pub let run_over_points: RunOver = RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = "from host.code import Point, Kernel")
+
+func area_lanes(call: Call*):
+    let results = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        results[lane] = (f32)(call.first + lane) * 0.5
+
+pub func make_host() -> Host!:
+    var host = Host()
+    try host.field("Point", "P", "P", 3)
+    try host.field("Point", "N", "N", 3)
+    try host.field("Point", "Cd", "Cd", 3)
+    try host.element("Point", "ptnum")
+    try host.uniform("Point", "numpt", "numpt")
+    try host.getter("Point", "f32", "", 1)
+    try host.setter("Point", "set_f32", "", 1)
+    try host.getter("Point", "vec3", "", 3)
+    try host.builtin("Point", "area", Builtin(name = "area", arguments = [.f32, .f32, .f32, .f32, .f32, .f32, .f32, .f32], argument_count = 0, results = [.f32, .f32, .f32, .f32], result_count = 1, run = area_lanes, context = none))
+    try host.uniform("Kernel", "time", "time")
+    try host.parameter("Kernel", "f32")
+    try host.parameter("Kernel", "i32")
+    try host.column("P", .f32, 3)
+    try host.column("N", .f32, 3)
+    try host.column("mass", .f32, 1)
+    return host
+
+## A fresh snippet root in the temporary directory, with the test host's stubs.
+pub func make_root(room: u8[]) -> str!:
+    let root = try strings.format(room, f"{path.temp()}/luce-kernel-suite-root")
+    try lower.write_root(root)
+    try lower.write_text(root, "host/code.lucb", stubs)
+    return root
+
+## Points with positions, normals and a mass column; the outputs start as copies.
+struct Columns:
+    var positions: f32[]
+    var normals: f32[]
+    var masses: f32[]
+    var moved: f32[]
+    var colors: f32[]
+    var weighed: f32[]
+
+    static func make() -> Columns!:
+        var made = Columns(positions = try new f32[points * 3] in memory.heap, normals = try new f32[points * 3] in memory.heap,
+                           masses = try new f32[points] in memory.heap, moved = try new f32[points * 3] in memory.heap,
+                           colors = try new f32[points * 3] in memory.heap, weighed = try new f32[points] in memory.heap)
+        for at in 0..<points:
+            made.positions[at * 3] = (f32)at * 0.0625
+            made.positions[at * 3 + 1] = (f32)(at % 5) * 0.25
+            made.positions[at * 3 + 2] = 1.0 - (f32)at * 0.03125
+            made.normals[at * 3 + 1] = 1.0
+            made.masses[at] = (f32)at * 0.5
+        return made
+
+    func release():
+        free(self.positions) in memory.heap
+        free(self.normals) in memory.heap
+        free(self.masses) in memory.heap
+        free(self.moved) in memory.heap
+        free(self.colors) in memory.heap
+        free(self.weighed) in memory.heap
+
+    ## Run `compiled` at every worker count; the outputs of the last run stay.
+    func run(compiled: const Compiled*, uniforms: const Uniform[]) -> engine.Fault?!:
+        var found: engine.Fault? = none
+        for threads in common.thread_counts:
+            memory.copy(self.moved, self.positions, self.positions.length)
+            memory.copy(self.weighed, self.masses, self.masses.length)
+            memory.set(u8[]((u8*)self.colors.data, self.colors.length * 4), 0)
+            let inputs = [Column.input_f32("P", self.positions, 3), Column.input_f32("N", self.normals, 3), Column.input_f32("mass", self.masses)]
+            let outputs = [Column.output_f32("P", self.moved, 3), Column.output_f32("Cd", self.colors, 3), Column.output_f32("mass", self.weighed)]
+            let request = Request(count = points, inputs = inputs, outputs = outputs, uniforms = uniforms, threads = threads, chunk = 7)
+            found = try engine.run(&compiled.program, &request)
+        return found
+
+## Compile `body` (and `header`), failing the suite with its diagnostics if it does not.
+pub func compiled_or_trap(root: str, host: const Host*, header: str, body: str) -> Compiled!:
+    var compiled = try lower.compile(root, run_over_points, header, body, host)
+    if not compiled.ok():
+        for d in compiled.diagnostics():
+            print(f"  {d.line}:{d.column}: {d.message}")
+        print(compiled.text())
+        trap("lowering: the snippet did not compile")
+    return compiled
+
+func same(name: str, got: f32, want: f32, at: usize):
+    if got.bits() != want.bits():
+        print(f"FAIL  lowering {name}: point {at}: {got} for {want}")
+        trap("lowering")
+
+pub let no_header: str = ""
+
+pub let wave_body: str = "p.P[1] += math32.sin(p.P[0] * 4.0) * 0.1\n"
+
+pub let displace_body: str = "let amount = k.f32(\"amount\", 0.2)\nlet scale = k.f32(\"scale\", 3.0)\nlet n = snoise(p.P * scale + [0.0, 0.0, (f32)k.time, 0.0])\np.P = p.P + p.N * (n * amount)\n"
+
+pub let colors_body: str = "p.Cd = rand3(p.ptnum)\n"
+
+pub let helpers_header: str = "func wave(x: f32) -> f32:\n    return math32.sin(x * 4.0) * 0.1\n\nfunc steps(count: i32) -> i32:\n    var total: i32 = 0\n    for i in 0..<count:\n        if i == 5:\n            break\n        total += i\n    return total\n"
+
+pub let helpers_body: str = "var y = p.P[1] + wave(p.P[0])\nif p.ptnum % 2 == 0:\n    y = -y\nelif p.ptnum % 3 == 0:\n    y *= 2.0\np.P[1] = y\np.set_f32(\"mass\", (f32)steps(p.ptnum % 9) + p.f32(\"mass\"))\nvar n: i32 = 0\nwhile n < p.ptnum % 4:\n    n += 1\np.Cd = [(f32)n, p.area(), (f32)k.i32(\"count\", 7), 0.0]\n"
+
+## The scalar truth for helpers_body.
+func steps_value(count: i32) -> i32:
+    var total: i32 = 0
+    for i in 0..<count:
+        if i == 5:
+            break
+        total += i
+    return total
+
+let constructs_body: str = "var total: f32 = 0.0\nlet weights: f32[4] = [1.0, 2.0, 3.0, 4.0]\nfor w in weights:\n    total += w\nouter: for i in 0..<4:\n    for j in 0..<4:\n        if i * j > p.ptnum % 5:\n            break outer\n        total += 1.0\nmatch p.ptnum % 3:\n    0: total += 10.0\n    1, 2 if p.ptnum > 30: total += 20.0\n    _: total -= 1.0\nlet big = p.P[0] > 2.0 and p.ptnum // 2 > 10\nlet chosen: f32 = 1.0 if big else 2.0\nif p.ptnum > 60:\n    return\np.Cd = [total, chosen, 0.0, 0.0]\n"
+
+## The scalar truth for constructs_body.
+func constructs_value(at: usize, x: f32) -> (f32, f32)?:
+    var total: f32 = 0.0
+    for w in [(f32)1.0, 2.0, 3.0, 4.0]:
+        total += w
+    let point = (i32)at
+    outer: for i in 0..<4:
+        for j in 0..<4:
+            if (i32)(i * j) > point % 5:
+                break outer
+            total += 1.0
+    match point % 3:
+        0: total += 10.0
+        1, 2 if point > 30: total += 20.0
+        _: total -= 1.0
+    let big = x > 2.0 and point // 2 > 10
+    let chosen: f32 = 1.0 if big else 2.0
+    if point > 60:
+        return none
+    return (total, chosen)
+
+## Compile `body` and check its first diagnostic: severity, part, line and message start.
+func expect_diagnostic(root: str, host: const Host*, header: str, body: str, part: lower.Part, line: u32, starts: str, severity: lower.Severity = .error) -> !:
+    var compiled = try lower.compile(root, run_over_points, header, body, host)
+    defer compiled.destroy()
+    for d in compiled.diagnostics():
+        if d.severity != severity:
+            continue
+        if d.part != part or d.line != line or not strings.starts_with(d.message, starts):
+            print(f"FAIL  lowering diagnostic: {d.line}:{d.column}: {d.message} (wanted line {line}: {starts})")
+            trap("lowering diagnostics")
+        print(f"ok    diagnostic at line {d.line}:{d.column}: {d.message}")
+        return
+    trap("lowering: no diagnostic")
+
+pub func run_all() -> !:
+    var room: u8[1024]
+    let root = try make_root(room)
+    var host = try make_host()
+    defer host.destroy()
+    var columns = try Columns.make()
+    defer columns.release()
+
+    var wave = try compiled_or_trap(root, &host, no_header, wave_body)
+    defer wave.destroy()
+    assert(try columns.run(&wave, common.no_uniforms()) == none)
+    for at in 0..<points:
+        let x = columns.positions[at * 3]
+        same("wave", columns.moved[at * 3 + 1], columns.positions[at * 3 + 1] + math32.sin(x * 4.0) * 0.1, at)
+        same("wave keeps x", columns.moved[at * 3], x, at)
+    print(f"ok    lowering wave: {wave.program.instructions().length} instructions")
+
+    var displace = try compiled_or_trap(root, &host, no_header, displace_body)
+    defer displace.destroy()
+    let uniforms = displace.program.uniforms()
+    assert(uniforms.length == 3 and uniforms[0].name == "amount" and uniforms[1].name == "scale" and uniforms[2].name == "time")
+    assert(f32.bits((u32)uniforms[0].default) == 0.2 and f32.bits((u32)uniforms[1].default) == 3.0)
+    assert(try columns.run(&displace, [Uniform.f64("time", 0.5)]) == none)
+    for at in 0..<points:
+        let p = columns.positions[at * 3..<at * 3 + 3]
+        let n = lib.snoise([p[0] * 3.0, p[1] * 3.0, p[2] * 3.0 + 0.5, 0.0])
+        for k: usize in 0..<3:
+            same("noise displacement", columns.moved[at * 3 + k], p[k] + columns.normals[at * 3 + k] * (n * 0.2), at)
+    print(f"ok    lowering noise displacement: {displace.program.instructions().length} instructions")
+
+    var colors = try compiled_or_trap(root, &host, no_header, colors_body)
+    defer colors.destroy()
+    assert(try columns.run(&colors, common.no_uniforms()) == none)
+    for at in 0..<points:
+        let want = lib.rand3((i64)at)
+        for k: usize in 0..<3:
+            same("rand3", columns.colors[at * 3 + k], want[k], at)
+    print(f"ok    lowering rand3: {colors.program.instructions().length} instructions")
+
+    var helpers = try compiled_or_trap(root, &host, helpers_header, helpers_body)
+    defer helpers.destroy()
+    assert(try columns.run(&helpers, common.no_uniforms()) == none)
+    for at in 0..<points:
+        let x = columns.positions[at * 3]
+        var y = columns.positions[at * 3 + 1] + math32.sin(x * 4.0) * 0.1
+        if at % 2 == 0:
+            y = -y
+        elif at % 3 == 0:
+            y *= 2.0
+        same("branches", columns.moved[at * 3 + 1], y, at)
+        same("helper with a loop", columns.weighed[at], (f32)steps_value((i32)(at % 9)) + columns.masses[at], at)
+        same("masked while", columns.colors[at * 3], (f32)(at % 4), at)
+        same("builtin", columns.colors[at * 3 + 1], (f32)at * 0.5, at)
+        same("parameter default", columns.colors[at * 3 + 2], 7.0, at)
+    print(f"ok    lowering branches, loops, helpers, builtins: {helpers.program.instructions().length} instructions")
+
+    var constructs = try compiled_or_trap(root, &host, no_header, constructs_body)
+    defer constructs.destroy()
+    assert(try columns.run(&constructs, common.no_uniforms()) == none)
+    for at in 0..<points:
+        if let found = constructs_value(at, columns.positions[at * 3]):
+            let (total, chosen) = found
+            same("loops, match, and, conditional", columns.colors[at * 3], total, at)
+            same("conditional", columns.colors[at * 3 + 1], chosen, at)
+        else:
+            same("early return", columns.colors[at * 3], 0.0, at)
+    print(f"ok    lowering match, labeled break, early return, lazy and: {constructs.program.instructions().length} instructions")
+
+    var faulting = try compiled_or_trap(root, &host, no_header, "let x = p.P[0]\nlet q = 100 // (p.ptnum - 10)\np.Cd = [x, (f32)q, 0.0, 0.0]\n")
+    defer faulting.destroy()
+    let fault = try columns.run(&faulting, common.no_uniforms()) else trap("lowering: no fault")
+    let (part, line, column) = faulting.locate(fault.line, fault.column)
+    print(f"      fault {fault.message} lane {fault.lane} at {fault.line}:{fault.column} -> {line}:{column}")
+    assert(fault.kind == .division and fault.lane == 10 and part == .body and line == 2 and column == 13)
+    print(f"ok    lowering fault: body line {line}:{column}: {fault.message} (point {fault.lane})")
+
+    try expect_diagnostic(root, &host, no_header, "let x: f32 = p.ptnum\n", .body, 1, "")
+    try expect_diagnostic(root, &host, no_header, "let x = p.P[0]\nprint(\"hello\")\n", .body, 2, "`print` is not available")
+    try expect_diagnostic(root, &host, no_header, "p.Cd[0] = p.f32(\"weight\")\n", .body, 1, "the input has no column `weight`")
+    try expect_diagnostic(root, &host, no_header, "p.Cd = p.vec3(\"mass\")\n", .body, 1, "`mass` is stored as f32")
+    try expect_diagnostic(root, &host, "func f(x: f32) -> f32:\n    return x +\n", "p.Cd[0] = f(1.0)\n", .header, 2, "")
+    try expect_diagnostic(root, &host, "func f(x: i32) -> i32:\n    return f(x)\n", "p.Cd[0] = (f32)f(1)\n", .header, 2, "recursion")
+    try expect_diagnostic(root, &host, no_header, "let unused_value = 1.0\np.Cd[0] = 1.0\n", .body, 1, "unused", severity = .warning)

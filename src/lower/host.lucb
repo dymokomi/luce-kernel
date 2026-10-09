@@ -1,0 +1,124 @@
+# The host's description of its API: what each member of its stub types stands for.
+
+## What an API member stands for.
+pub enum Role:
+    ## A field holding a host column (`p.P`): reading it reads the column, writing it
+    ## writes the column back when the run ends.
+    field
+    ## An accessor `p.f32("mass")`: reads the column named by its literal argument.
+    getter
+    ## A setter `p.set_f32("mass", value)`: writes the column named by its literal argument.
+    setter
+    ## The element's number (`p.ptnum`).
+    element
+    ## A uniform named by the binding (`k.time`, `p.numpt`).
+    uniform
+    ## A uniform named by the call's literal argument, with its literal default
+    ## (`k.f32("amount", 0.2)`): the node's spare parameters.
+    parameter
+    ## A host builtin; the receiver is not passed.
+    builtin
+
+## One member of the API and what it stands for.
+pub struct Binding:
+    ## The struct the member belongs to (`Point`), or for a free function its module
+    ## (`luce_geocore.code`).
+    pub let owner: str
+    ## The field or method.
+    pub let member: str
+    pub let role: Role
+    ## The column (`field`), the column name prefix (`getter`, `setter`: the column is the
+    ## prefix and the literal), or the uniform (`uniform`).
+    pub let column: str
+    ## Values per element in the column: 3 for a three-component `f32[4]`, whose lane 3
+    ## reads 0 and is never written.
+    pub let components: usize
+    pub let builtin: Builtin?
+
+## A column the input has: its name, kind and components, for the lowering to check reads
+## against (an attribute signature).
+pub struct InputColumn:
+    pub let name: str
+    pub let kind: Kind
+    pub let components: usize
+
+## The host's API description. A zero value is empty; `destroy` gives back its storage.
+pub struct Host:
+    var bindings: collections.List[Binding]
+    var input_columns: collections.List[InputColumn]
+    var known_columns: bool
+    var texts: collections.TextPool
+
+    ## Field `member` of struct `owner` is component-wise column `column`.
+    pub func field(owner: str, member: str, column: str, components: usize) -> !:
+        try self.add(owner, member, .field, column, components, none)
+
+    ## Method `member` of `owner` reads column `prefix` + its literal first argument.
+    pub func getter(owner: str, member: str, prefix: str, components: usize) -> !:
+        try self.add(owner, member, .getter, prefix, components, none)
+
+    ## Method `member` of `owner` writes its second argument into column `prefix` + its
+    ## literal first argument.
+    pub func setter(owner: str, member: str, prefix: str, components: usize) -> !:
+        try self.add(owner, member, .setter, prefix, components, none)
+
+    ## Field `member` of `owner` is the element's number.
+    pub func element(owner: str, member: str) -> !:
+        try self.add(owner, member, .element, "", 1, none)
+
+    ## Field `member` of `owner` is uniform `uniform`.
+    pub func uniform(owner: str, member: str, uniform: str) -> !:
+        try self.add(owner, member, .uniform, uniform, 1, none)
+
+    ## Method `member` of `owner` is a parameter: a uniform named by its literal first
+    ## argument, with its literal second argument (or the parameter's default) as default.
+    pub func parameter(owner: str, member: str) -> !:
+        try self.add(owner, member, .parameter, "", 1, none)
+
+    ## Method `member` of struct `owner` (or function `member` of module `owner`) runs
+    ## host builtin `builtin` over its arguments, vectors passed lane by lane.
+    pub func builtin(owner: str, member: str, builtin: Builtin) -> !:
+        try self.add(owner, member, .builtin, "", 1, builtin)
+
+    ## The input has column `name`. Once any is declared, a snippet may read only declared
+    ## columns, each in its stored kind; writing an undeclared one creates it.
+    pub func column(name: str, kind: Kind, components: usize) -> !:
+        let kept = try self.texts.keep_text(name.bytes)
+        try self.input_columns.append(InputColumn(name = kept, kind = kind, components = components))
+        self.known_columns = true
+
+    ## Give back the storage.
+    pub func destroy():
+        self.bindings.destroy()
+        self.input_columns.destroy()
+        self.texts.destroy()
+        self.known_columns = false
+
+    ## The binding of `member` of `owner`.
+    pub func find(owner: str, member: str) -> Binding?:
+        for binding in self.bindings.view():
+            if binding.owner == owner and binding.member == member:
+                return binding
+        return none
+
+    ## The input column `name`, when declared.
+    pub func input_column(name: str) -> InputColumn?:
+        for column in self.input_columns.view():
+            if column.name == name:
+                return column
+        return none
+
+    ## Whether `owner` has any binding (its values are API values a snippet holds).
+    pub func binds(owner: str) -> bool:
+        for binding in self.bindings.view():
+            if binding.owner == owner:
+                return true
+        return false
+
+    func add(owner: str, member: str, role: Role, column: str, components: usize, builtin: Builtin?) -> !:
+        if self.find(owner, member) != none:
+            error(bad_host, "a member bound twice")
+        if components == 0 or components > 16:
+            error(bad_host, "a column has 1 to 16 components")
+        let binding = Binding(owner = try self.texts.keep_text(owner.bytes), member = try self.texts.keep_text(member.bytes), role = role, column = try self.texts.keep_text(column.bytes), components = components, builtin = builtin)
+        try self.bindings.append(binding)

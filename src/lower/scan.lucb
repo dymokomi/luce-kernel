@@ -1,0 +1,337 @@
+# The scan before a function is lowered: which locals differ between elements (and so
+# are written under the exec mask, and their conditions become masks), which are written
+# inside branches or loops (and so need registers of their own), and which columns the
+# snippet reads and writes.
+
+extend Lowerer:
+    ## The struct name of a value of a host type (`Point` for a `Point*`), if it is one.
+    func api_type(type_id: u32) -> str?:
+        if type_id <= types.f16_id:
+            return none
+        var t = self.c.table.get(type_id)
+        if t.kind == types.Kind.pointer:
+            t = self.c.table.get(t.elem)
+        if t.kind != types.Kind.struct_ or not self.host.binds(t.name):
+            return none
+        return t.name
+
+    ## The binding of `owner.member` when the owner is a host API value.
+    func binding_of(owner: ast.Node*?, member: str) -> Binding?:
+        let value = owner else return none
+        let name = self.api_type(value.type_id) else return none
+        return self.host.find(name, member)
+
+    ## The binding a call goes through: an API method, or a host function of a module.
+    func call_binding(call: ast.Node*) -> Binding?:
+        let callee = call.left else return none
+        if callee.kind == ast.Kind.member:
+            if let found = self.binding_of(callee.left, callee.text):
+                return found
+        let decl = call.resolved else return none
+        let module = self.module_name_of(decl) else return none
+        return self.host.find(module, decl.text)
+
+    ## The module whose top level declares `decl`.
+    func module_name_of(decl: ast.Node*) -> str?:
+        for m in self.c.modules.span():
+            var cursor = m.tree.body
+            while let d = cursor:
+                if d == decl:
+                    return m.name
+                cursor = d.next
+        return none
+
+    ## Whether `e` may differ between elements.
+    func varies(e: ast.Node*?) -> bool:
+        let node = e else return false
+        match node.kind:
+            .literal:
+                return false
+            .name:
+                let decl = node.resolved else return false
+                if self.is_varying(decl):
+                    return true
+                return decl.kind == ast.Kind.param and self.is_element_number(decl)
+            .member:
+                if let binding = self.binding_of(node.left, node.text):
+                    return binding.role != .uniform and binding.role != .parameter
+                return self.varies(node.left)
+            .call:
+                if let binding = self.call_binding(node):
+                    if binding.role == .parameter or binding.role == .uniform:
+                        return false
+                    if binding.role != .builtin:
+                        return true
+                    return true
+                return self.varies_list(node.body)
+            .argument:
+                return self.varies(node.left)
+            _:
+                return self.varies(node.left) or self.varies(node.right) or self.varies_list(node.body) or (node.kind == ast.Kind.conditional and self.varies(node.ty))
+
+    func varies_list(list: ast.Node*?) -> bool:
+        var cursor = list
+        while let node = cursor:
+            if self.varies(node):
+                return true
+            cursor = node.next
+        return false
+
+    ## Whether a parameter of the entry is the element's number (`n: i64` of Numbers).
+    func is_element_number(decl: ast.Node*) -> bool:
+        if self.functions.length() == 0:
+            return false
+        let entry = self.functions.at(0).decl
+        var cursor = entry.right
+        while let parameter = cursor:
+            if parameter == decl:
+                return scalar_kind(decl.type_id) != none
+            cursor = parameter.next
+        return false
+
+    ## Scan function body `body` until the classification settles. `all_varying` makes
+    ## every context element-dependent (a function that can return early).
+    func scan_function(body: ast.Node*?) -> !:
+        let all_varying = has_early_return(body, 0)
+        self.changed = true
+        while self.changed:
+            self.changed = false
+            # After an early return the lanes that returned keep their values, so every
+            # write is a masked one into fixed registers.
+            try self.scan_list(body, all_varying, 1 if all_varying else 0)
+
+    func mark_varying(decl: ast.Node*) -> !:
+        if not self.is_varying(decl):
+            try self.varying_decls.append(decl)
+            self.changed = true
+
+    func mark_pinned(decl: ast.Node*) -> !:
+        if not self.is_pinned(decl):
+            try self.pinned_decls.append(decl)
+
+    func scan_list(list: ast.Node*?, context: bool, depth: u32) -> !:
+        var cursor = list
+        while let statement = cursor:
+            try self.scan_statement(statement, context, depth)
+            cursor = statement.next
+
+    func scan_statement(s: ast.Node*, context: bool, depth: u32) -> !:
+        match s.kind:
+            .block:
+                try self.scan_list(s.body, context, depth)
+            .let_, .var_:
+                try self.scan_expression(s.left)
+                if self.varies(s.left):
+                    try self.mark_varying(s)
+            .assign:
+                try self.scan_expression(s.right)
+                try self.scan_place(s.left, context or self.varies(s.right), depth, 16)
+            .if_:
+                try self.scan_expression(s.left)
+                let inner = context or self.varies(s.left)
+                if let then_block = s.body:
+                    try self.scan_statement(then_block, inner, depth + 1)
+                if let otherwise = s.right:
+                    try self.scan_statement(otherwise, inner, depth + 1)
+            .while_:
+                try self.scan_expression(s.left)
+                try self.scan_list(s.body, context or self.varies(s.left) or has_exit(s.body), depth + 1)
+            .for_:
+                let binding = s.left else return
+                try self.scan_expression(s.right)
+                if self.varies(s.right):
+                    try self.mark_varying(binding)
+                try self.scan_list(s.body, context or self.varies(s.right) or has_exit(s.body), depth + 1)
+            .match_:
+                try self.scan_expression(s.left)
+                var arms = s.body
+                var inner = context or self.varies(s.left)
+                while let arm = arms:
+                    if self.varies(arm.right):
+                        inner = true
+                    arms = arm.next
+                arms = s.body
+                while let arm = arms:
+                    if let arm_body = arm.body:
+                        try self.scan_statement(arm_body, inner, depth + 1)
+                    arms = arm.next
+            .return_:
+                try self.scan_expression(s.left)
+            .expr_stmt:
+                try self.scan_expression(s.left)
+            _:
+                return
+
+    ## Columns an expression reads, through fields and accessors.
+    func scan_expression(e: ast.Node*?) -> !:
+        let node = e else return
+        match node.kind:
+            .member:
+                if let binding = self.binding_of(node.left, node.text):
+                    if binding.role == .field:
+                        let at = try self.column_use(node, binding.column, binding.components, node.type_id)
+                        self.mark_read(at)
+                    return
+            .call:
+                if let binding = self.call_binding(node):
+                    if binding.role == .getter or binding.role == .setter:
+                        let name = try self.literal_name(node, binding.column)
+                        let value_type = node.type_id if binding.role == .getter else argument_type(node, 1)
+                        let at = try self.column_use(node, name, binding.components, value_type)
+                        if binding.role == .getter:
+                            self.mark_read(at)
+                        else:
+                            try self.mark_written(at, 16, false)
+                        try self.scan_expression_list(node.body)
+                        return
+            _:
+                _ = 0
+        try self.scan_expression(node.left)
+        try self.scan_expression(node.right)
+        try self.scan_expression(node.ty)
+        try self.scan_expression_list(node.body)
+
+    func scan_expression_list(list: ast.Node*?) -> !:
+        var cursor = list
+        while let node = cursor:
+            try self.scan_expression(node)
+            cursor = node.next
+
+    ## A written place: its root local or column, which lane (16: all), whether masked.
+    func scan_place(place: ast.Node*?, varying: bool, depth: u32, lane: usize) -> !:
+        let node = place else return
+        match node.kind:
+            .name:
+                let decl = node.resolved else return
+                if varying: try self.mark_varying(decl)
+                if depth > 0 or lane == 17: try self.mark_pinned(decl)
+            .index:
+                try self.scan_expression(node.body)
+                var which: usize = 17
+                if let index = node.body:
+                    if let constant = self.c.exact_integer(index, 64, true):
+                        if constant >= 0 and constant < 16: which = (usize)constant
+                try self.scan_place(node.left, varying or self.varies(node.body), depth, which)
+            .member:
+                let binding = self.binding_of(node.left, node.text) else return
+                if binding.role != .field:
+                    return
+                let at = try self.column_use(node, binding.column, binding.components, node.type_id)
+                try self.mark_written(at, lane, depth > 0 or lane == 17)
+            _:
+                return
+
+    # mark: Columns ===========================================================================
+
+    ## The column `name` used with a value of `type_id`, added when new.
+    func column_use(node: ast.Node*, name: str, components: usize, type_id: u32) -> usize!:
+        for (at, column) in self.columns.view().indexed():
+            if column.name == name:
+                if column.type_id != type_id:
+                    try self.fail(node, "a column used with two different types")
+                return at
+        let (kind, width) = try self.shape_or_fail(node, type_id)
+        if components > width:
+            try self.fail(node, "a column has more components than its value has lanes")
+        let kept = try self.texts.keep_text(name.bytes)
+        var use = ColumnUse(name = kept, kind = kind, width = width, components = components, type_id = type_id, value = self.nothing(), first_use = node)
+        if self.host.known_columns:
+            if let stored = self.host.input_column(name):
+                if stored.kind != kind or stored.components < components:
+                    let text = strings.format(self.room, f"`{name}` is stored as {stored.kind.name()} with {stored.components} components") else "a column of another type"
+                    try self.fail(node, text)
+        try self.columns.append(use)
+        return self.columns.length() - 1
+
+    func mark_read(at: usize):
+        var use = self.columns.at(at)
+        use.read = true
+        self.columns.set(at, use)
+
+    func mark_written(at: usize, lane: usize, pinned: bool) -> !:
+        var use = self.columns.at(at)
+        for k in 0..<use.width:
+            if (lane >= 16 or k == lane) and k < use.components:
+                use.written[k] = true
+        use.pinned = use.pinned or pinned
+        self.columns.set(at, use)
+
+    ## The column a getter or setter call names: `prefix` and its literal first argument.
+    func literal_name(call: ast.Node*, prefix: str) -> str!:
+        let first = call.body else return ""
+        let value = first.left else return ""
+        if value.kind != ast.Kind.literal or value.text.length < 2 or value.text.bytes[0] != '"':
+            try self.fail(value, "a column name must be a literal")
+        let name = (str)value.text.bytes[1..<value.text.length - 1]
+        var joined: u8[512]
+        let text = strings.format(joined, f"{prefix}{name}") else name
+        return try self.texts.keep_text(text.bytes)
+
+## The type of argument `index` of a call.
+func argument_type(call: ast.Node*, index: usize) -> u32:
+    var cursor = call.body
+    var at: usize = 0
+    while let argument = cursor:
+        if at == index:
+            if let value = argument.left:
+                return value.type_id
+        at += 1
+        cursor = argument.next
+    return types.none_id
+
+## Whether a statement list holds a `break`, `continue` or `return` (outside nested loops
+## for the first two).
+func has_exit(list: ast.Node*?) -> bool:
+    var cursor = list
+    while let s = cursor:
+        match s.kind:
+            .break_, .continue_, .return_:
+                return true
+            .while_, .for_:
+                if has_return(s.body): return true
+            _:
+                if has_exit(s.body) or has_exit_branch(s.right):
+                    return true
+                if s.kind == ast.Kind.match_ and has_exit_arms(s.body):
+                    return true
+        cursor = s.next
+    return false
+
+func has_exit_branch(branch: ast.Node*?) -> bool:
+    let node = branch else return false
+    if node.kind == ast.Kind.block:
+        return has_exit(node.body)
+    if node.kind == ast.Kind.if_:
+        return has_exit(node.body) or has_exit_branch(node.right) or has_exit_branch(node.body)
+    return false
+
+func has_exit_arms(arms: ast.Node*?) -> bool:
+    var cursor = arms
+    while let arm = cursor:
+        if let arm_body = arm.body:
+            if has_exit(arm_body.body): return true
+        cursor = arm.next
+    return false
+
+## Whether a statement list holds a `return` anywhere.
+func has_return(list: ast.Node*?) -> bool:
+    var cursor = list
+    while let s = cursor:
+        if s.kind == ast.Kind.return_:
+            return true
+        if has_return(s.body) or has_return(s.right):
+            return true
+        cursor = s.next
+    return false
+
+## Whether a `return` comes anywhere but as the last statement of the function's body.
+func has_early_return(body: ast.Node*?, depth: u32) -> bool:
+    var cursor = body
+    while let s = cursor:
+        if s.kind == ast.Kind.return_:
+            if depth > 0 or s.next != none:
+                return true
+        elif has_early_return(s.body, depth + 1) or has_early_return(s.right, depth + 1):
+            return true
+        cursor = s.next
+    return false

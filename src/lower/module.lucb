@@ -1,0 +1,33 @@
+#==============================================================================================
+#
+#   lower - From a Code node's Base snippet to a column program
+#
+#   DESCRIPTION:
+#       The user writes only a function body, as in a Wrangle. `wrap` puts it in the entry
+#       function its Run Over mode declares (`point(p: Point*, k: const Kernel*)` and the
+#       like), with the imports a snippet gets for free; `write_root` lays out the modules
+#       the checker resolves them against; `compile` checks the module with the Base
+#       compiler's own checker (luce-base's `embed`) and lowers the typed tree to an
+#       `engine.Program`. Every diagnostic, the checker's and the lowering's, points at the
+#       user's line and column.
+#
+#       luce-kernel knows nothing about meshes. A `Host` says what the API's members mean:
+#       which fields are columns (`p.P`), which accessors read or write columns by a literal
+#       name (`p.f32("mass")`), which are the element's number (`p.ptnum`), which are
+#       uniforms (`k.time`, `k.f32("amount", 0.2)`), and which methods are host builtins.
+#
+#       What a snippet may use is the safe subset of CODE-NODE.md §4.4; anything else is a
+#       diagnostic "not available in a kernel" at its line. Conditions that differ between
+#       elements become masks: both sides of an `if` run over the chunk, each on its own
+#       lanes; conditions that are the same for every element become real jumps.
+#
+#==============================================================================================
+import c
+import sync
+import strings
+from luce_std import collections, files
+from luce_base import embed
+from luce_base.front import ast
+from luce_base.sema import check, types
+import engine
+from engine import Builder, Program, Kind, Op, Builtin, no_register

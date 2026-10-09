@@ -1,0 +1,119 @@
+# The module a snippet becomes: the free imports, the host's imports, the header (helper
+# functions and constants) and the body inside the Run Over entry function; and the map
+# from the module's lines back to the user's text.
+
+## What a Run Over mode declares: the entry function's name and parameters, and the
+## imports of the API types they name (all supplied by the host).
+pub struct RunOver:
+    ## `point`, `prim`, `vertex`, `detail`, `number`.
+    pub let entry: str
+    ## `p: Point*, k: const Kernel*`.
+    pub let parameters: str
+    ## `from luce_geocore.code import Point, Kernel`; several lines allowed.
+    pub let imports: str
+
+## Which part of the node's text a position is in.
+pub enum Part:
+    ## Generated lines the user never sees.
+    wrapper
+    ## The header text: helper functions and constants.
+    header
+    ## The body text.
+    body
+
+## The functions `lib` gives a snippet without an import.
+let lib_names: str[54] = [
+    "lerp", "lerp64", "clamp", "clamp64", "fit01", "fit01_64", "fit", "fit64", "smooth", "smooth64",
+    "degrees", "degrees64", "radians", "radians64", "dot", "cross", "length", "length2", "distance", "distance2",
+    "normalized", "dot2d", "length2d", "distance2d", "normalized2d", "dot64", "cross64", "length64", "length2_64", "distance64",
+    "distance2_64", "normalized64", "rand", "rand64", "rand3", "rand_stream", "rand_stream64", "random_bits", "snoise1", "snoise2",
+    "snoise", "snoise4", "noise1", "noise2", "noise", "noise4", "snoise1_64", "snoise2_64", "snoise64", "snoise4_64",
+    "noise1_64", "noise2_64", "noise64", "noise4_64",
+]
+
+## A wrapped snippet: the module text and where the header and body lines are in it.
+pub struct Wrapped:
+    var bytes: collections.List[u8]
+    var header_first: u32
+    var header_lines: u32
+    var body_first: u32
+    var body_lines: u32
+
+    ## The module text.
+    pub func text() -> str:
+        return (str)self.bytes.view()
+
+    ## Where line `line`, column `column` (both 1-based, columns in bytes) of the module is
+    ## in the user's text: the part, its line and its column.
+    pub func locate(line: u32, column: u32) -> (Part, u32, u32):
+        if line >= self.header_first and line < self.header_first + self.header_lines:
+            return (Part.header, line - self.header_first + 1, column)
+        if line >= self.body_first and line < self.body_first + self.body_lines:
+            return (Part.body, line - self.body_first + 1, column - 4 if column > 4 else 1)
+        return (Part.wrapper, line, column)
+
+    ## Give back the text.
+    pub func destroy():
+        self.bytes.destroy()
+
+    func put(text: str) -> !:
+        for byte in text.bytes:
+            try self.bytes.append(byte)
+
+## Wrap `body` (and `header`) for `run_over`. Every line of the body is indented one level
+## inside the entry function; an empty body is a function that does nothing.
+pub func wrap(run_over: RunOver, header: str, body: str) -> Wrapped!:
+    var wrapped = Wrapped()
+    errdefer wrapped.destroy()
+    try wrapped.put("# Generated from a Code node's text; positions map back to it.\nfrom luce_std import math, math32\nfrom luce_kernel.lib import ")
+    var first = true
+    for name in lib_names:
+        if not first: try wrapped.put(", ")
+        try wrapped.put(name)
+        first = false
+    try wrapped.put("\n")
+    try wrapped.put(run_over.imports)
+    try wrapped.put("\n")
+    var line: u32 = 4 + count_lines(run_over.imports)
+    wrapped.header_first = line
+    wrapped.header_lines = count_lines(header)
+    if header.length > 0:
+        try wrapped.put(header)
+        if header.bytes[header.length - 1] != '\n': try wrapped.put("\n")
+    line += wrapped.header_lines
+    try wrapped.put("pub func ")
+    try wrapped.put(run_over.entry)
+    try wrapped.put("(")
+    try wrapped.put(run_over.parameters)
+    try wrapped.put("):\n")
+    wrapped.body_first = line + 1
+    wrapped.body_lines = count_lines(body)
+    var start: usize = 0
+    var any_statement = false
+    for at in 0..<body.length + 1:
+        if at < body.length and body.bytes[at] != '\n':
+            continue
+        let text = (str)body.bytes[start..<at]
+        if text.length > 0:
+            try wrapped.put("    ")
+            try wrapped.put(text)
+            if strings.trim(text).length > 0 and strings.trim(text).bytes[0] != '#':
+                any_statement = true
+        try wrapped.put("\n")
+        start = at + 1
+    if body.length > 0 and body.bytes[body.length - 1] == '\n':
+        # The loop wrote an empty last line after the final newline.
+        wrapped.bytes.truncate(wrapped.bytes.length() - 1)
+    if not any_statement:
+        try wrapped.put("    return\n")
+    return wrapped
+
+## How many lines `text` spans (a final newline ends the last line).
+func count_lines(text: str) -> u32:
+    if text.length == 0:
+        return 0
+    var lines: u32 = 1
+    for at in 0..<text.length:
+        if text.bytes[at] == '\n' and at + 1 < text.length:
+            lines += 1
+    return lines

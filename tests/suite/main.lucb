@@ -5,6 +5,7 @@ import bench
 import conformance
 import faults
 import fuzz
+import lowering
 
 pub func main(arguments: str[]) -> i32!:
     if arguments.length > 1 and arguments[1] == "--bench":
@@ -13,4 +14,5 @@ pub func main(arguments: str[]) -> i32!:
     try faults.run_all()
     try conformance.run_all()
     try fuzz.run_all()
+    try lowering.run_all()
     return 0

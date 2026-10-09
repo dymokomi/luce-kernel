@@ -1,0 +1,373 @@
+# Calls: Base's `assert` and `trap`, checked conversions, the host API, `lib` and
+# luce-std's `math` and `math32` (one column operation each), and the snippet's own
+# helper functions, which are inlined.
+
+extend Lowerer:
+    func call(e: ast.Node*) -> Value!:
+        let callee = e.left else return self.nothing()
+        if callee.has(ast.flag_builtin):
+            return try self.core_call(e, callee.text)
+        if callee.has(ast.flag_type_ref) and e.resolved == none:
+            return try self.conversion(e)
+        if let binding = self.call_binding(e):
+            return try self.api_call(e, binding)
+        let decl = e.resolved else return try self.not_available(e, "this call")
+        let module = self.module_name_of(decl) else return try self.not_available(e, "this call")
+        if module == "luce_kernel.lib":
+            return try self.lib_call(e, decl)
+        if module == "luce_std.math32" or module == "luce_std.math":
+            return try self.math_call(e, decl)
+        if module == self.c.modules.get(self.snippet).name and decl.kind == ast.Kind.func_:
+            return try self.inline(e, decl)
+        var room: u8[200]
+        let what = strings.format(room, f"`{decl.text}`") else "this function"
+        return try self.not_available(e, what)
+
+    ## The arguments of a call, each converted to its parameter's type, defaults filled in.
+    func arguments(e: ast.Node*, decl: ast.Node*, values: Value[]) -> usize!:
+        var parameters = decl.right
+        var given = e.body
+        var count: usize = 0
+        while let parameter = parameters:
+            if count >= values.length:
+                try self.fail(e, "too many arguments")
+            var source: ast.Node*? = parameter.left
+            if let argument = given:
+                source = argument.left
+                given = argument.next
+            if source == none:
+                try self.fail(e, "a missing argument")
+            let node = source else return count
+            values[count] = try self.converted(try self.expression(node), parameter.type_id, node)
+            count += 1
+            parameters = parameter.next
+        return count
+
+    # mark: Core functions and conversions ====================================================
+
+    func core_call(e: ast.Node*, name: str) -> Value!:
+        let first = e.body
+        if name == "assert":
+            let condition_node = (first else return self.nothing()).left else return self.nothing()
+            let condition = try self.expression(condition_node)
+            var message = "assert failed"
+            if let second = (first else return self.nothing()).next:
+                message = try self.text_literal(second.left)
+            else:
+                let src = self.c.modules.get(self.snippet).src
+                var room: u8[400]
+                let spelled = (str)src.bytes[condition_node.start..<condition_node.end]
+                message = try self.texts.keep_text((strings.format(room, f"assert failed: {spelled}") else "assert failed").bytes)
+            self.position(e)
+            self.sync()
+            self.b.check(condition.lanes[0], message)
+            return self.nothing()
+        if name == "trap":
+            var message = "trap"
+            if let argument = first:
+                message = try self.text_literal(argument.left)
+            self.position(e)
+            self.sync()
+            self.b.trap(message)
+            return self.nothing()
+        var room: u8[100]
+        return try self.not_available(e, strings.format(room, f"`{name}`") else "this call")
+
+    ## The text of a string literal (simple escapes decoded).
+    func text_literal(node: ast.Node*?) -> str!:
+        let literal = node else return ""
+        if literal.kind != ast.Kind.literal or literal.text.length < 2 or literal.text.bytes[0] != '"':
+            try self.fail(literal, "a message must be a literal")
+        var decoded: u8[512]
+        var used: usize = 0
+        var at: usize = 1
+        let bytes = literal.text.bytes
+        while at + 1 < bytes.length and used < 511:
+            var byte = bytes[at]
+            if byte == '\\' and at + 2 < bytes.length:
+                at += 1
+                byte = match bytes[at]:
+                    'n' => (u8)'\n'
+                    't' => (u8)'\t'
+                    'r' => (u8)'\r'
+                    '0' => (u8)0
+                    _ => bytes[at]
+            decoded[used] = byte
+            used += 1
+            at += 1
+        return try self.texts.keep_text(decoded[..<used])
+
+    ## `T(x)`: Base's checked conversion; `f32[4](x)`: every lane `x`.
+    func conversion(e: ast.Node*) -> Value!:
+        let argument = e.body else return try self.fail_value(e, "a conversion of nothing")
+        let operand_node = argument.left else return self.nothing()
+        let operand = try self.expression(operand_node)
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        self.position(e)
+        if width > 1:
+            if operand.width != 1:
+                return try self.not_available(e, "this conversion")
+            var lane = operand.lanes[0]
+            if operand.kind != kind:
+                self.sync()
+                lane = self.b.convert(lane, kind)
+            var result = self.scalar(kind, lane, operand.uniform, e.type_id)
+            result.width = width
+            for k in 1..<width: result.lanes[k] = lane
+            return result
+        if operand.width != 1:
+            return try self.not_available(e, "this conversion")
+        if operand.kind == kind:
+            return self.scalar(kind, operand.lanes[0], operand.uniform, e.type_id)
+        if operand.kind == .mask or kind == .mask:
+            return try self.not_available(e, "this conversion")
+        self.sync()
+        return self.scalar(kind, self.b.convert(operand.lanes[0], kind), operand.uniform, e.type_id)
+
+    # mark: The host API ======================================================================
+
+    func api_call(e: ast.Node*, binding: Binding) -> Value!:
+        match binding.role:
+            .getter:
+                let name = try self.literal_name(e, binding.column)
+                let at = try self.column_index(e, name)
+                let use = self.columns.at(at)
+                var value = use.value
+                value.borrowed = use.pinned
+                return value
+            .setter:
+                let name = try self.literal_name(e, binding.column)
+                let argument = (e.body else return self.nothing()).next else return try self.fail_value(e, "a setter without a value")
+                let value_node = argument.left else return self.nothing()
+                let at = try self.column_index(e, name)
+                let value = try self.converted(try self.expression(value_node), self.columns.at(at).type_id, value_node)
+                try self.write_column(e, name, value, 16)
+                return self.nothing()
+            .parameter:
+                let name = try self.literal_name(e, "")
+                var default: ast.Node*? = none
+                if let first = e.body:
+                    if let second = first.next:
+                        default = second.left
+                if default == none:
+                    if let decl = e.resolved:
+                        if let first_parameter = decl.right:
+                            if let second_parameter = first_parameter.next:
+                                default = second_parameter.left
+                return try self.uniform_value(e, name, e.type_id, default)
+            .builtin:
+                return try self.builtin_call(e, binding)
+            _:
+                return try self.fail_value(e, "this member is not a method")
+
+    ## A host builtin: the arguments' lanes in order, the results as the call's value.
+    func builtin_call(e: ast.Node*, binding: Binding) -> Value!:
+        let builtin = binding.builtin else return self.nothing()
+        var registers: u16[8]
+        var count: usize = 0
+        var uniform = true
+        var cursor = e.body
+        while let argument = cursor:
+            let node = argument.left else return self.nothing()
+            let value = try self.expression(node)
+            uniform = uniform and value.uniform
+            for k in 0..<value.width:
+                if count >= builtin.argument_count:
+                    return try self.fail_value(e, "more argument lanes than the builtin takes")
+                if value.kind != builtin.arguments[count]:
+                    return try self.fail_value(node, "an argument of another kind than the builtin takes")
+                registers[count] = value.lanes[k]
+                count += 1
+            cursor = argument.next
+        if count != builtin.argument_count:
+            return try self.fail_value(e, "fewer argument lanes than the builtin takes")
+        self.position(e)
+        self.sync()
+        let first = self.b.call(builtin, registers[..<count])
+        if e.type_id == types.unit_id:
+            return self.nothing()
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        if width != builtin.result_count or kind != builtin.results[0]:
+            return try self.fail_value(e, "a builtin whose results differ from the method's type")
+        var result = self.scalar(kind, first, false, e.type_id)
+        result.width = width
+        for k in 0..<width: result.lanes[k] = first + (u16)k
+        return result
+
+    # mark: lib and math ======================================================================
+
+    func lib_call(e: ast.Node*, decl: ast.Node*) -> Value!:
+        var values: Value[5]
+        let count = try self.arguments(e, decl, values)
+        let name = decl.text
+        self.position(e)
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        var uniform = true
+        for k in 0..<count: uniform = uniform and values[k].uniform
+        if name == "dot" or name == "dot2d" or name == "dot64":
+            return self.scalar(kind, self.b.dot(self.consecutive(values[0]), self.consecutive(values[1]), values[0].width), uniform, e.type_id)
+        if name == "length" or name == "length2d" or name == "length64":
+            return self.scalar(kind, self.b.length(self.consecutive(values[0]), values[0].width), uniform, e.type_id)
+        if name == "length2" or name == "length2_64":
+            return self.scalar(kind, self.b.length2(self.consecutive(values[0]), values[0].width), uniform, e.type_id)
+        if name == "distance" or name == "distance2d" or name == "distance64":
+            return self.scalar(kind, self.b.distance(self.consecutive(values[0]), self.consecutive(values[1]), values[0].width), uniform, e.type_id)
+        if name == "distance2" or name == "distance2_64":
+            return self.scalar(kind, self.b.distance2(self.consecutive(values[0]), self.consecutive(values[1]), values[0].width), uniform, e.type_id)
+        if name == "cross" or name == "cross64":
+            let first = self.b.cross(self.consecutive(values[0]), self.consecutive(values[1]))
+            var result = self.zero(kind, width, e.type_id)
+            for k: u16 in 0..<3: result.lanes[(usize)k] = first + k
+            result.uniform = uniform
+            return result
+        if name == "normalized" or name == "normalized2d" or name == "normalized64":
+            let first = self.b.normalize(self.consecutive(values[0]), values[0].width)
+            var result = self.scalar(kind, first, uniform, e.type_id)
+            result.width = width
+            for k in 0..<width: result.lanes[k] = first + (u16)k
+            return result
+        if name == "lerp" or name == "lerp64" or name == "clamp" or name == "clamp64" or name == "smooth" or name == "smooth64" or name == "fit01" or name == "fit01_64":
+            let op: Op = .lerp if name.bytes[0] == 'l' else (.clamp if name.bytes[0] == 'c' else (.smooth if name.bytes[0] == 's' else .fit01))
+            return self.scalar(kind, self.b.ternary(op, values[0].lanes[0], values[1].lanes[0], values[2].lanes[0]), uniform, e.type_id)
+        if name == "fit" or name == "fit64":
+            return self.scalar(kind, self.b.fit(values[0].lanes[0], values[1].lanes[0], values[2].lanes[0], values[3].lanes[0], values[4].lanes[0]), uniform, e.type_id)
+        if name == "degrees" or name == "degrees64" or name == "radians" or name == "radians64":
+            return self.scalar(kind, self.b.unary(.degrees if name.bytes[0] == 'd' else .radians, values[0].lanes[0]), uniform, e.type_id)
+        if name == "rand" or name == "rand64" or name == "rand3":
+            if name == "rand3":
+                var result = self.zero(kind, width, e.type_id)
+                for k: u16 in 0..<3: result.lanes[(usize)k] = self.b.rand(values[0].lanes[0], .f32, k)
+                result.uniform = uniform
+                return result
+            return self.scalar(kind, self.b.rand(values[0].lanes[0], kind, 0), uniform, e.type_id)
+        if name == "rand_stream" or name == "rand_stream64":
+            let argument = (e.body else return self.nothing()).next else return self.nothing()
+            let stream_node = argument.left else return self.nothing()
+            let stream = self.c.exact_integer(stream_node, 32, false) else return try self.fail_value(stream_node, "a random stream must be a constant")
+            if stream < 0 or stream > 65535:
+                return try self.fail_value(stream_node, "a random stream is 0 to 65535")
+            return self.scalar(kind, self.b.rand(values[0].lanes[0], kind, (u16)stream), uniform, e.type_id)
+        let noise = noise_shape(name) else return try self.not_available(e, "this lib function")
+        let (signed, dimensions) = noise
+        let point = self.consecutive(values[0])
+        let value = self.b.snoise(point, dimensions) if signed else self.b.noise(point, dimensions)
+        return self.scalar(kind, value, uniform, e.type_id)
+
+    func math_call(e: ast.Node*, decl: ast.Node*) -> Value!:
+        var values: Value[3]
+        let count = try self.arguments(e, decl, values)
+        let name = decl.text
+        self.position(e)
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        _ = width
+        var uniform = true
+        for k in 0..<count: uniform = uniform and values[k].uniform
+        if let op = math_unary(name):
+            return self.scalar(kind, self.b.unary(op, values[0].lanes[0]), uniform, e.type_id)
+        if let op = math_classify(name):
+            return self.scalar(.mask, self.b.classify(op, values[0].lanes[0]), uniform, e.type_id)
+        if let op = math_binary(name):
+            if op == .abs or op == .min or op == .max:
+                self.sync()
+            if op == .abs:
+                return self.scalar(kind, self.b.unary(.abs, values[0].lanes[0]), uniform, e.type_id)
+            return self.scalar(kind, self.b.binary(op, values[0].lanes[0], values[1].lanes[0]), uniform, e.type_id)
+        if name == "fma":
+            return self.scalar(kind, self.b.ternary(.mul_add, values[0].lanes[0], values[1].lanes[0], values[2].lanes[0]), uniform, e.type_id)
+        if name == "clamp" or name == "iclamp":
+            # luce-std asserts ordered bounds, so a reversed pair fails the run as Base would.
+            self.sync()
+            self.b.check(self.b.compare(.le, values[1].lanes[0], values[2].lanes[0]), "assert failed: low <= high")
+            return self.scalar(kind, self.b.ternary(.clamp, values[0].lanes[0], values[1].lanes[0], values[2].lanes[0]), uniform, e.type_id)
+        var room: u8[120]
+        return try self.not_available(e, strings.format(room, f"`{name}`") else "this function")
+
+    # mark: Helpers ===========================================================================
+
+    ## A helper function of the snippet, inlined: its parameters bound to the arguments,
+    ## its body lowered in place, `return` writing its result.
+    func inline(e: ast.Node*, decl: ast.Node*) -> Value!:
+        if contains(self.inlining.view(), decl):
+            return try self.fail_value(e, "recursion is not available in a kernel")
+        var values: Value[16]
+        let count = try self.arguments(e, decl, values)
+        try self.inlining.append(decl)
+        let locals_before = self.locals.length()
+        let varying_before = self.varying_decls.length()
+        let pinned_before = self.pinned_decls.length()
+        var parameters = decl.right
+        var at: usize = 0
+        while let parameter = parameters:
+            if at < count:
+                if not values[at].uniform: try self.varying_decls.append(parameter)
+                try self.declare(parameter, values[at])
+            at += 1
+            parameters = parameter.next
+        let body = decl.body else return self.nothing()
+        # A body that is one `return value` is the value.
+        if let only = body.body:
+            if only.kind == ast.Kind.return_ and only.next == none and only.left != none:
+                let result_node = only.left else return self.nothing()
+                let returns = self.c.table.get(decl.type_id).elem
+                let value = try self.converted(try self.expression(result_node), returns, result_node)
+                self.locals.truncate(locals_before)
+                self.varying_decls.truncate(varying_before)
+                self.inlining.truncate(self.inlining.length() - 1)
+                return value
+        try self.scan_function(body.body)
+        let returns = self.c.table.get(decl.type_id).elem
+        var function = Function(decl = decl, live = no_register, result = self.nothing(), has_result = returns != types.unit_id)
+        if function.has_result:
+            let (kind, width) = try self.shape_or_fail(e, returns)
+            function.result = self.copied(self.zero(kind, width, returns))
+            function.result.uniform = false
+        if has_early_return(body.body, 0):
+            function.live = self.b.register(.mask)
+            self.b.emit(.copy, .mask, function.live, self.b.constant_mask(true), 0, 0)
+            try self.push_frame(function.live)
+        try self.functions.append(function)
+        try self.statements(body.body)
+        self.functions.truncate(self.functions.length() - 1)
+        if function.live != no_register:
+            self.pop_frame()
+        self.locals.truncate(locals_before)
+        self.varying_decls.truncate(varying_before)
+        self.pinned_decls.truncate(pinned_before)
+        self.inlining.truncate(self.inlining.length() - 1)
+        return function.result
+
+## lib's noise functions: signed or not, and dimensions.
+func noise_shape(name: str) -> (bool, usize)?:
+    let signed = name.bytes[0] == 's'
+    let rest = (str)name.bytes[(1 if signed else 0)..]
+    if rest == "noise1" or rest == "noise1_64": return (signed, 1)
+    if rest == "noise2" or rest == "noise2_64": return (signed, 2)
+    if rest == "noise" or rest == "noise64": return (signed, 3)
+    if rest == "noise4" or rest == "noise4_64": return (signed, 4)
+    return none
+
+## math and math32 functions that are one unary column operation.
+func math_unary(name: str) -> Op?:
+    let names: str[22] = ["floor", "ceil", "round", "trunc", "sqrt", "cbrt", "exp", "exp2", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "sign", "abs"]
+    let ops: Op[22] = [.floor, .ceil, .round, .trunc, .sqrt, .cbrt, .exp, .exp2, .log, .log2, .log10, .sin, .cos, .tan, .asin, .acos, .atan, .sinh, .cosh, .tanh, .sign, .abs]
+    for (at, known) in names.indexed():
+        if known == name:
+            return ops[at]
+    return none
+
+func math_classify(name: str) -> Op?:
+    if name == "is_nan": return Op.isnan
+    if name == "is_infinite": return Op.isinf
+    if name == "is_finite": return Op.isfinite
+    return none
+
+## Binary math functions, and math's integer helpers.
+func math_binary(name: str) -> Op?:
+    if name == "pow": return Op.pow
+    if name == "atan2": return Op.atan2
+    if name == "hypot": return Op.hypot
+    if name == "mod": return Op.fmod
+    if name == "min" or name == "imin": return Op.min
+    if name == "max" or name == "imax": return Op.max
+    if name == "iabs": return Op.abs
+    return none

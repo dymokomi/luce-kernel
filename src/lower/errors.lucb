@@ -1,0 +1,7 @@
+# The errors of the lowering module. A snippet the subset does not take is not an error
+# of the call: it is a diagnostic in the result.
+
+## A `Host` binding was refused (a duplicate, or out of range).
+pub let bad_host: ErrorCode = ErrorCode.package(4)
+## Internal: a construct the lowering stopped at; its diagnostic holds the details.
+let refused: ErrorCode = ErrorCode.package(5)

@@ -1,0 +1,407 @@
+# Expressions: literals, names, API members, operators, indexing, conversions, the
+# conditional and array literals. Arithmetic is lane-wise over vectors, a scalar
+# operand standing for every lane, and computes in the operands' own width.
+
+extend Lowerer:
+    ## Instructions from here on came from `node`'s line and column of the snippet module.
+    func position(node: ast.Node*):
+        let m = self.c.modules.get(self.snippet)
+        let (file, line, column) = m.src.located(node.start)
+        _ = file
+        self.b.at(line, column)
+
+    func expression(e: ast.Node*) -> Value!:
+        self.position(e)
+        match e.kind:
+            .literal: return try self.literal(e)
+            .name: return try self.name(e)
+            .member: return try self.member(e)
+            .index: return try self.index(e)
+            .unary: return try self.unary(e)
+            .binary: return try self.binary(e)
+            .call: return try self.call(e)
+            .cast: return try self.cast(e)
+            .conditional: return try self.conditional(e)
+            .array_lit: return try self.array(e)
+            .group:
+                let inner = e.left else return try self.fail_value(e, "an empty group")
+                return try self.expression(inner)
+            .formatted: return try self.not_available(e, "formatted text")
+            _: return try self.fail_value(e, "this expression is not available in a kernel")
+
+    # mark: Literals and names ================================================================
+
+    func literal(e: ast.Node*) -> Value!:
+        if e.text == "true" or e.text == "false":
+            return self.scalar(.mask, self.b.constant_mask(e.text == "true"), true, types.bool_id)
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        _ = width
+        let bits = self.literal_bits(e, kind, false) else return try self.fail_value(e, "a literal a kernel cannot read")
+        return self.scalar(kind, self.b.constant(kind, bits), true, e.type_id)
+
+    ## The bits of a literal (negated when `negative`) as `kind`; none for text.
+    func literal_bits(e: ast.Node*, kind: Kind, negative: bool) -> u64?:
+        let first = e.text.bytes[0] if e.text.length > 0 else 0
+        if first == '"' or first == '\'' or first == 'b' or first == 'r' or first == 'f':
+            return none
+        if kind.is_float():
+            var digits: u8[128]
+            var used: usize = 0
+            for byte in e.text.bytes:
+                if byte == '_': continue
+                if byte == 'f': break
+                if used < 127:
+                    digits[used] = byte
+                    used += 1
+            let text = (str)digits[..<used]
+            if kind == .f32:
+                let value = strings.parse_f32(text) catch failure: return none
+                return (u64)(-value if negative else value).bits()
+            let value = strings.parse_f64(text) catch failure: return none
+            return (-value if negative else value).bits()
+        let width: u64 = 64 if kind.size() == 8 else 32
+        let value = self.c.exact_integer(e, width, kind.is_signed()) else return none
+        let signed = -%value if negative else value
+        return (u64)signed if width == 64 else (u64)(u32)signed
+
+    func name(e: ast.Node*) -> Value!:
+        let decl = e.resolved else return try self.fail_value(e, "a name the checker did not resolve")
+        if let at = self.find_local(decl):
+            return self.local_value(at)
+        if decl.kind == ast.Kind.constant:
+            let initial = decl.left else return try self.fail_value(e, "a constant without a value")
+            return try self.converted(try self.expression(initial), decl.type_id, initial)
+        if decl.kind == ast.Kind.param and self.is_element_number(decl):
+            let (kind, width) = try self.shape_or_fail(e, decl.type_id)
+            _ = width
+            return self.scalar(kind, self.b.index(kind), false, decl.type_id)
+        if self.api_type(e.type_id) != none:
+            return try self.fail_value(e, "an API value is used through its members, not as a value")
+        return try self.not_available(e, "this name")
+
+    ## `p.P`, `p.ptnum`, `k.time`, `math32.pi`.
+    func member(e: ast.Node*) -> Value!:
+        if let binding = self.binding_of(e.left, e.text):
+            match binding.role:
+                .field:
+                    let at = try self.column_index(e, binding.column)
+                    let use = self.columns.at(at)
+                    var value = use.value
+                    value.borrowed = use.pinned
+                    return value
+                .element:
+                    let (kind, width) = try self.shape_or_fail(e, e.type_id)
+                    _ = width
+                    return self.scalar(kind, self.b.index(kind), false, e.type_id)
+                .uniform:
+                    return try self.uniform_value(e, binding.column, e.type_id, none)
+                _:
+                    return try self.fail_value(e, "this member is a method; call it")
+        let decl = e.resolved else return try self.not_available(e, "this member")
+        if decl.kind == ast.Kind.constant:
+            if let value = self.math_constant(decl):
+                return value
+            let initial = decl.left else return try self.fail_value(e, "a constant without a value")
+            return try self.converted(try self.expression(initial), decl.type_id, initial)
+        return try self.not_available(e, "this member")
+
+    ## `math.pi` and its siblings, built from bits where luce-std computes them.
+    func math_constant(decl: ast.Node*) -> Value?:
+        let wide = decl.type_id == types.f64_id
+        if not wide and decl.type_id != types.f32_id:
+            return none
+        var value: f64 = 0.0
+        if decl.text == "pi": value = 3.141592653589793
+        elif decl.text == "tau": value = 6.283185307179586
+        elif decl.text == "e": value = 2.718281828459045
+        elif decl.text == "infinity": value = f64.bits(0x7FF0000000000000)
+        elif decl.text == "nan": value = f64.bits(0x7FF8000000000000)
+        else: return none
+        if wide:
+            return self.scalar(.f64, self.b.constant_f64(value), true, decl.type_id)
+        return self.scalar(.f32, self.b.constant_f32((f32)value), true, decl.type_id)
+
+    ## Uniform `name` of `type_id`, a vector's lanes named `name[k]`, with default bits.
+    func uniform_value(e: ast.Node*, name: str, type_id: u32, default: ast.Node*?) -> Value!:
+        let (kind, width) = try self.shape_or_fail(e, type_id)
+        var bits: u64 = 0
+        if let given = default:
+            var negative = false
+            var literal_node = given
+            if given.kind == ast.Kind.unary and given.text == "-":
+                if let inner = given.left:
+                    negative = true
+                    literal_node = inner
+            if literal_node.kind != ast.Kind.literal:
+                return try self.fail_value(given, "a parameter's default must be a literal")
+            bits = self.literal_bits(literal_node, kind, negative) else return try self.fail_value(given, "a parameter's default must be a number")
+        var value = self.scalar(kind, 0, true, type_id)
+        value.width = width
+        for k in 0..<width:
+            if width == 1:
+                value.lanes[k] = self.b.uniform(name, kind, bits)
+            else:
+                var room: u8[300]
+                let lane_name = strings.format(room, f"{name}[{k}]") else name
+                value.lanes[k] = self.b.uniform(try self.texts.keep_text(lane_name.bytes), kind, 0)
+        return value
+
+    # mark: Indexing ==========================================================================
+
+    func index(e: ast.Node*) -> Value!:
+        let owner_node = e.left else return self.nothing()
+        let index_node = e.body else return self.nothing()
+        let owner = try self.expression(owner_node)
+        if let constant = self.c.exact_integer(index_node, 64, true):
+            let lane = try self.lane_number(index_node, constant, owner_node)
+            var value = self.scalar(owner.kind, owner.lanes[lane], owner.uniform, e.type_id)
+            value.borrowed = owner.borrowed
+            return value
+        let at = try self.expression(index_node)
+        self.position(e)
+        self.sync()
+        let picked = self.b.pick(self.consecutive(owner), owner.width, at.lanes[0])
+        return self.scalar(owner.kind, picked, owner.uniform and at.uniform, e.type_id)
+
+    # mark: Operators =========================================================================
+
+    func unary(e: ast.Node*) -> Value!:
+        let operand_node = e.left else return self.nothing()
+        if e.text == "-" and operand_node.kind == ast.Kind.literal:
+            let (kind, width) = try self.shape_or_fail(e, e.type_id)
+            _ = width
+            if let bits = self.literal_bits(operand_node, kind, true):
+                return self.scalar(kind, self.b.constant(kind, bits), true, e.type_id)
+        let operand = try self.expression(operand_node)
+        self.position(e)
+        let op: Op = match e.text:
+            "-" => Op.neg
+            "-%" => Op.wneg
+            "~", "not" => Op.bnot
+            _ => Op.copy
+        if op == .copy:
+            return try self.not_available(e, "pointers")
+        if op == .neg and not operand.kind.is_float():
+            self.sync()
+        var result = operand
+        result.borrowed = false
+        result.type_id = e.type_id
+        for k in 0..<operand.width:
+            result.lanes[k] = self.b.unary(op, operand.lanes[k])
+        return result
+
+    func binary(e: ast.Node*) -> Value!:
+        let left_node = e.left else return self.nothing()
+        let right_node = e.right else return self.nothing()
+        if e.text == "and" or e.text == "or":
+            return try self.logical(e, left_node, right_node)
+        if e.text == "+?" or e.text == "-?" or e.text == "*?":
+            return try self.not_available(e, "optional arithmetic")
+        let left = try self.expression(left_node)
+        let right = try self.expression(right_node)
+        self.position(e)
+        let value = try self.operate(e, e.text, left, try self.converted_operand(right, left, right_node))
+        var typed = value
+        if value.kind != .mask: typed.type_id = e.type_id
+        return typed
+
+    ## `a and b`, `a or b`: `b` runs only on the lanes it decides (it may fault).
+    func logical(e: ast.Node*, left_node: ast.Node*, right_node: ast.Node*) -> Value!:
+        let left = try self.expression(left_node)
+        let both = e.text == "and"
+        if not may_fault(right_node):
+            let right = try self.expression(right_node)
+            let joined = self.b.binary(.band if both else .bor, left.lanes[0], right.lanes[0])
+            return self.scalar(.mask, joined, left.uniform and right.uniform, types.bool_id)
+        let deciding = left.lanes[0] if both else self.b.unary(.bnot, left.lanes[0])
+        let result = self.b.copy(left.lanes[0])
+        try self.push_frame(deciding)
+        let skip = self.b.label()
+        self.skip_if_idle(skip)
+        let right = try self.expression(right_node)
+        self.sync()
+        self.b.assign(result, right.lanes[0])
+        self.pop_frame()
+        self.join(skip)
+        return self.scalar(.mask, result, left.uniform and right.uniform, types.bool_id)
+
+    ## `a op b` lane by lane (a scalar standing for every lane of a vector).
+    func operate(node: ast.Node*, symbol: str, a: Value, b: Value) -> Value!:
+        let op = operator(symbol, a.kind) else return try self.not_available(node, "this operator")
+        if not op.accepts(a.kind):
+            return try self.not_available(node, "this operator on this type")
+        if op == .eq or op == .ne or op == .lt or op == .le or op == .gt or op == .ge:
+            if a.width != 1:
+                return try self.not_available(node, "comparing vectors")
+            return self.scalar(.mask, self.b.compare(op, a.lanes[0], b.lanes[0]), a.uniform and b.uniform, types.bool_id)
+        if faults(op, a.kind):
+            self.sync()
+        let width = a.width if a.width > b.width else b.width
+        var result = a if a.width >= b.width else b
+        result.borrowed = false
+        result.uniform = a.uniform and b.uniform
+        for k in 0..<width:
+            let x = a.lanes[k] if a.width > 1 else a.lanes[0]
+            let y = b.lanes[k] if b.width > 1 else b.lanes[0]
+            result.lanes[k] = self.b.binary(op, x, y)
+        return result
+
+    ## The right operand in the left one's kind: an integer widened, a shift count cast.
+    func converted_operand(right: Value, left: Value, node: ast.Node*) -> Value!:
+        if right.kind == left.kind:
+            return right
+        if left.width > 1 and right.width == 1 and right.kind == left.kind:
+            return right
+        if right.kind.is_integer() and left.kind.is_integer():
+            var cast = right
+            for k in 0..<right.width:
+                cast.lanes[k] = self.b.cast(right.lanes[k], left.kind)
+            cast.kind = left.kind
+            cast.borrowed = false
+            return cast
+        return try self.fail_value(node, "operands of different types")
+
+    # mark: Conversions =======================================================================
+
+    ## `value` as type `type_id`: the same registers when it already is, an integer widened
+    ## (the conversion Base makes without a spelling).
+    func converted(value: Value, type_id: u32, node: ast.Node*) -> Value!:
+        let (kind, width) = try self.shape_or_fail(node, type_id)
+        if value.kind == kind and value.width == width:
+            var same = value
+            same.type_id = type_id
+            return same
+        if value.width == width and value.kind.is_integer() and kind.is_integer():
+            var cast = value
+            for k in 0..<width:
+                cast.lanes[k] = self.b.cast(value.lanes[k], kind)
+            cast.kind = kind
+            cast.type_id = type_id
+            cast.borrowed = false
+            return cast
+        return try self.fail_value(node, "a value of another type than expected")
+
+    ## `(T)x`: C's cast, lane by lane.
+    func cast(e: ast.Node*) -> Value!:
+        let operand_node = e.left else return self.nothing()
+        let operand = try self.expression(operand_node)
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        if width != operand.width:
+            return try self.not_available(e, "this cast")
+        var result = operand
+        result.kind = kind
+        result.type_id = e.type_id
+        result.borrowed = false
+        if operand.kind != kind:
+            for k in 0..<width:
+                result.lanes[k] = self.b.cast(operand.lanes[k], kind)
+        return result
+
+    # mark: Conditional and arrays ============================================================
+
+    ## `x if c else y`: each side computed on its own lanes when it could fault.
+    func conditional(e: ast.Node*) -> Value!:
+        let decision_node = e.ty else return self.nothing()
+        let then_node = e.left else return self.nothing()
+        let else_node = e.right else return self.nothing()
+        let decision = try self.expression(decision_node)
+        if not may_fault(then_node) and not may_fault(else_node):
+            let yes = try self.converted(try self.expression(then_node), e.type_id, then_node)
+            let no = try self.converted(try self.expression(else_node), e.type_id, else_node)
+            var result = yes
+            result.borrowed = false
+            result.uniform = decision.uniform and yes.uniform and no.uniform
+            for k in 0..<yes.width:
+                result.lanes[k] = self.b.select(decision.lanes[0], yes.lanes[k], no.lanes[k])
+            return result
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        let held = self.copied(self.zero(kind, width, e.type_id))
+        try self.side(decision.lanes[0], then_node, held, e.type_id)
+        try self.side(self.b.unary(.bnot, decision.lanes[0]), else_node, held, e.type_id)
+        var result = held
+        result.uniform = false
+        return result
+
+    ## Compute `node` on the lanes in `mask` into `held`.
+    func side(mask: u16, node: ast.Node*, held: Value, type_id: u32) -> !:
+        try self.push_frame(mask)
+        let skip = self.b.label()
+        self.skip_if_idle(skip)
+        let value = try self.converted(try self.expression(node), type_id, node)
+        self.write_registers(held, value, 16, false)
+        self.pop_frame()
+        self.join(skip)
+
+    func array(e: ast.Node*) -> Value!:
+        let (kind, width) = try self.shape_or_fail(e, e.type_id)
+        let element_type = self.c.table.get(e.type_id).elem
+        var result = self.scalar(kind, 0, true, e.type_id)
+        result.width = width
+        var cursor = e.body
+        var at: usize = 0
+        while let element = cursor:
+            if at >= width:
+                return try self.fail_value(element, "an array literal longer than its type")
+            let value = try self.converted(try self.expression(element), element_type, element)
+            result.lanes[at] = value.lanes[0]
+            result.uniform = result.uniform and value.uniform
+            at += 1
+            cursor = element.next
+        return result
+
+## The operation a binary operator spells for operands of `kind`.
+func operator(symbol: str, kind: Kind) -> Op?:
+    let floating = kind.is_float()
+    if symbol == "+": return Op.add
+    if symbol == "-": return Op.sub
+    if symbol == "*": return Op.mul
+    if symbol == "/": return Op.div
+    if symbol == "//": return Op.idiv
+    if symbol == "%": return Op.fmod if floating else Op.rem
+    if symbol == "+%": return Op.wadd
+    if symbol == "-%": return Op.wsub
+    if symbol == "*%": return Op.wmul
+    if symbol == "+|": return Op.sadd
+    if symbol == "-|": return Op.ssub
+    if symbol == "*|": return Op.smul
+    if symbol == "&": return Op.band
+    if symbol == "|": return Op.bor
+    if symbol == "^": return Op.bxor
+    if symbol == "<<": return Op.shl
+    if symbol == ">>": return Op.shr
+    if symbol == "==": return Op.eq
+    if symbol == "!=": return Op.ne
+    if symbol == "<": return Op.lt
+    if symbol == "<=": return Op.le
+    if symbol == ">": return Op.gt
+    if symbol == ">=": return Op.ge
+    return none
+
+## Whether `op` on `kind` can fault (and so needs the exec mask set).
+func faults(op: Op, kind: Kind) -> bool:
+    if kind.is_float():
+        return false
+    return op == .add or op == .sub or op == .mul or op == .idiv or op == .rem or op == .shl or op == .shr or op == .neg or op == .abs
+
+## Whether evaluating `e` could fault: integer arithmetic, conversions, indexing by a
+## value, and calls (which may assert).
+func may_fault(e: ast.Node*?) -> bool:
+    let node = e else return false
+    match node.kind:
+        .literal, .name:
+            return false
+        .call, .index:
+            return true
+        .binary:
+            let integer = node.type_id != types.f32_id and node.type_id != types.f64_id and node.type_id != types.bool_id
+            if integer and node.text != "&" and node.text != "|" and node.text != "^" and node.text != "+%" and node.text != "-%" and node.text != "*%":
+                return true
+            return may_fault(node.left) or may_fault(node.right)
+        .unary:
+            return (node.text == "-" and node.type_id != types.f32_id and node.type_id != types.f64_id) or may_fault(node.left)
+        _:
+            var cursor = node.body
+            while let child = cursor:
+                if may_fault(child): return true
+                cursor = child.next
+            return may_fault(node.left) or may_fault(node.right) or may_fault(node.ty)

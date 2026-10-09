@@ -1,0 +1,21 @@
+# The snippet root: the directory `embed.check_root` resolves a snippet's imports in.
+
+## Write the modules every snippet may import into directory `root`: luce-kernel's `lib`
+## (as `luce_kernel/lib`) and luce-std's `math` and `math32` (as `luce_std/`). The host
+## adds its own stub modules (`luce_geocore/code.lucb`); `compile` writes the snippet.
+pub func write_root(root: str) -> !:
+    for (at, path) in source_paths.indexed():
+        try write_text(root, path, source_texts[at])
+
+## Write `text` to `root/relative`, creating directories on the way.
+pub func write_text(root: str, relative: str, text: str) -> !:
+    var room: u8[4096]
+    let full = try strings.format(room, f"{root}/{relative}")
+    var cut = full.length
+    while cut > 0 and full.bytes[cut - 1] != '/':
+        cut -= 1
+    if cut > 1:
+        var folder_room: u8[4096]
+        let folder = try strings.format(folder_room, f"{(str)full.bytes[..<cut - 1]}")
+        try files.ensure_directory(folder)
+    try files.write((c.str)full, text.bytes)

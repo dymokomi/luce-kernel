@@ -7,7 +7,9 @@ import time
 from luce_kernel import engine
 from luce_kernel.engine import Column, Request, Uniform, Program
 import conformance
+import lowering
 import snippets
+from luce_kernel import lower
 
 let points: usize = 1000000
 
@@ -42,6 +44,31 @@ pub func run_all() -> !:
         try measure("noise displacement", &displace, &request)
         try measure("rand3", &colors, &request)
         try measure("empty", &empty, &request)
+    # The same snippets lowered from Base text (only P is an input, so the request differs).
+    var room: u8[1024]
+    let root = try lowering.make_root(room)
+    var host = try lowering.make_host()
+    defer host.destroy()
+    var compiled_wave = try lowering.compiled_or_trap(root, &host, lowering.no_header, lowering.wave_body)
+    defer compiled_wave.destroy()
+    var compiled_displace = try lowering.compiled_or_trap(root, &host, lowering.no_header, lowering.displace_body)
+    defer compiled_displace.destroy()
+    var compiled_colors = try lowering.compiled_or_trap(root, &host, lowering.no_header, lowering.colors_body)
+    defer compiled_colors.destroy()
+    for threads in [(usize)1, 0]:
+        let request = Request(count = points, inputs = inputs, outputs = outputs, uniforms = uniforms, threads = threads)
+        try measure("wave, lowered", &compiled_wave.program, &request)
+        try measure("noise displacement, lowered", &compiled_displace.program, &request)
+        try measure("rand3, lowered", &compiled_colors.program, &request)
+    # Check and lower: the helpers snippet (header and body, about 25 lines), best of 20.
+    var fastest: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<20:
+        let started = time.now()
+        var compiled = try lower.compile(root, lowering.run_over_points, lowering.helpers_header, lowering.helpers_body, &host)
+        let spent = time.since(started)
+        compiled.destroy()
+        if spent < fastest: fastest = spent
+    print(f"check and lower\t1\t{(f64)fastest / 1000000.0}")
     var best: u64 = 0xFFFFFFFFFFFFFFFF
     for _ in 0..<5:
         let started = time.now()

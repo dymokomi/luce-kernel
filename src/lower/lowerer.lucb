@@ -1,0 +1,314 @@
+# The lowering's state: values in registers, the locals and columns they live in, the
+# exec-mask frames of branches and loops, and the first refusal with its position.
+
+## A value in registers: `width` lanes of `kind` (1 for a scalar; a vector or a small
+## array has more), lane k in register `lanes[k]`.
+struct Value:
+    var kind: Kind
+    var width: usize
+    var lanes: u16[16]
+    ## Every element has the same value (built from constants and uniforms only).
+    var uniform: bool
+    ## The registers belong to a variable that may still change: a copy keeps the value.
+    var borrowed: bool
+    ## The Base type.
+    var type_id: u32
+
+## A local variable or `let`: its declaration and the registers holding it.
+struct Local:
+    var decl: ast.Node*
+    var value: Value
+    ## Its registers stay fixed (it is written inside a branch or loop): writes go into
+    ## them. Otherwise a write just makes the new value the local's.
+    var pinned: bool
+    ## Written in no element-dependent context: writes ignore the exec mask.
+    var uniform: bool
+
+## A column the snippet reads or writes through a field or accessor.
+struct ColumnUse:
+    var name: str
+    var kind: Kind
+    ## Lanes of the Base value (4 for an `f32[4]`) and values per element in the column.
+    var width: usize
+    var components: usize
+    var type_id: u32
+    var read: bool
+    var written: bool[16]
+    var pinned: bool
+    var value: Value
+    ## Where the snippet first names it, for diagnostics.
+    var first_use: ast.Node*?
+
+## A loop being lowered: lanes still looping (`alive`, when it has a `break`), lanes that
+## did not `continue` this round (`going`, when it has a `continue`), and its label.
+struct Loop:
+    var label: str
+    var alive: u16
+    var going: u16
+
+## A function being lowered, the entry or an inlined helper: the lanes that have not
+## returned (`live`, when a `return` can come before its end) and a helper's result.
+struct Function:
+    var decl: ast.Node*
+    var live: u16
+    var result: Value
+    var has_result: bool
+
+## Everything the walk over one entry function keeps.
+struct Lowerer:
+    var c: const check.Checker*
+    var host: const Host*
+    var b: Builder
+    var snippet: usize
+    var locals: collections.List[Local]
+    var columns: collections.List[ColumnUse]
+    var frames: collections.List[u16]
+    var loops: collections.List[Loop]
+    var functions: collections.List[Function]
+    var inlining: collections.List[ast.Node*]
+    var varying_decls: collections.List[ast.Node*]
+    var pinned_decls: collections.List[ast.Node*]
+    var texts: collections.TextPool
+    var exec_now: u16 = 0xFFFF
+    var exec_dirty: bool
+    var changed: bool
+    ## The first refusal: where and why.
+    var failed: bool
+    var failure_offset: usize
+    var failure_module: usize
+    var failure: str
+    var room: u8[512]
+
+    func destroy():
+        self.b.destroy()
+        self.locals.destroy()
+        self.columns.destroy()
+        self.frames.destroy()
+        self.loops.destroy()
+        self.functions.destroy()
+        self.inlining.destroy()
+        self.varying_decls.destroy()
+        self.pinned_decls.destroy()
+        self.texts.destroy()
+
+    # mark: Refusals ==========================================================================
+
+    ## Stop with `message` at `node`.
+    func fail(node: ast.Node*, message: str) -> !:
+        if not self.failed:
+            self.failed = true
+            self.failure_offset = node.start
+            self.failure_module = self.module_of(node)
+            self.failure = self.texts.keep_text(message.bytes) catch failure:
+                recover "out of memory"
+        error(refused, message)
+
+    func fail_value(node: ast.Node*, message: str) -> Value!:
+        try self.fail(node, message)
+        return self.nothing()
+
+    ## "`name` is not available in a kernel", at `node`.
+    func not_available(node: ast.Node*, what: str) -> Value!:
+        let text = strings.format(self.room, f"{what} is not available in a kernel") else "not available in a kernel"
+        return try self.fail_value(node, text)
+
+    ## The snippet module, where every node the lowering meets lives.
+    func module_of(node: ast.Node*) -> usize:
+        _ = node
+        return self.snippet
+
+    func nothing() -> Value:
+        return Value(kind = .f32, width = 0, lanes = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], uniform = true, borrowed = false, type_id = types.none_id)
+
+    # mark: Types =============================================================================
+
+    ## The engine kind and lane count of a Base type a kernel holds: a scalar, or a vector
+    ## or array of up to 16 scalars.
+    func shape(type_id: u32) -> (Kind, usize)?:
+        if let kind = scalar_kind(type_id):
+            return (kind, 1)
+        if type_id <= types.f16_id:
+            return none
+        let t = self.c.table.get(type_id)
+        if t.kind != types.Kind.array or t.length == 0 or t.length > 16:
+            return none
+        let element = scalar_kind(t.elem) else return none
+        return (element, (usize)t.length)
+
+    ## The shape of `type_id`, or a refusal at `node`.
+    func shape_or_fail(node: ast.Node*, type_id: u32) -> (Kind, usize)!:
+        if let found = self.shape(type_id):
+            return found
+        var described: u8[200]
+        let name = self.type_name(described, type_id)
+        let text = strings.format(self.room, f"a value of type `{name}` is not available in a kernel") else "this type is not available in a kernel"
+        try self.fail(node, text)
+        return (Kind.f32, 1)
+
+    func type_name(buffer: u8[], type_id: u32) -> str:
+        let t = self.c.table.get(type_id)
+        if t.name.length > 0:
+            return t.name
+        if type_id == types.i8_id: return "i8"
+        if type_id == types.i16_id: return "i16"
+        if type_id == types.u8_id: return "u8"
+        if type_id == types.u16_id: return "u16"
+        if type_id == types.str_id: return "str"
+        return strings.format(buffer, f"type {type_id}") else "this type"
+
+    # mark: Values ============================================================================
+
+    ## A scalar value in `register`.
+    func scalar(kind: Kind, register: u16, uniform: bool, type_id: u32) -> Value:
+        var value = self.nothing()
+        value.kind = kind
+        value.width = 1
+        value.lanes[0] = register
+        value.uniform = uniform
+        value.type_id = type_id
+        return value
+
+    ## Fresh registers holding a copy of `value` (consecutive, so vector operations take
+    ## them), written on every lane.
+    func copied(value: Value) -> Value:
+        var copy = value
+        let first = self.b.vector(value.kind, value.width)
+        for k in 0..<value.width:
+            copy.lanes[k] = first + (u16)k
+            self.b.emit(.copy, value.kind, first + (u16)k, value.lanes[k], 0, 0)
+        copy.borrowed = false
+        return copy
+
+    ## `value` in consecutive registers (the first of them), copying when its lanes are not.
+    func consecutive(value: Value) -> u16:
+        var ordered = true
+        for k in 1..<value.width:
+            if value.lanes[k] != value.lanes[0] + (u16)k:
+                ordered = false
+        if ordered and not value.borrowed:
+            return value.lanes[0]
+        return self.copied(value).lanes[0]
+
+    ## The zero of a type's shape.
+    func zero(kind: Kind, width: usize, type_id: u32) -> Value:
+        var value = self.scalar(kind, self.b.constant(kind, 0), true, type_id)
+        value.width = width
+        for k in 1..<width:
+            value.lanes[k] = value.lanes[0]
+        return value
+
+    # mark: Exec masks ========================================================================
+
+    ## Narrow the active lanes to `mask` (and every frame already open).
+    func push_frame(mask: u16) -> !:
+        try self.frames.append(mask)
+        self.exec_dirty = true
+
+    func pop_frame():
+        self.frames.truncate(self.frames.length() - 1)
+        self.exec_dirty = true
+
+    ## Make the exec mask the frames' intersection, if anything changed since it was set.
+    ## Jump targets mark it changed: the paths into a label may have left different masks.
+    func sync():
+        if not self.exec_dirty:
+            return
+        self.exec_dirty = false
+        let count = self.frames.length()
+        if count == 0:
+            self.b.exec_all()
+            self.exec_now = no_register
+            return
+        var mask = self.frames.at(0)
+        for at in 1..<count:
+            mask = self.b.binary(.band, mask, self.frames.at(at))
+        self.b.exec(mask)
+        self.exec_now = mask
+
+    ## Bind `label` (a join: the mask is set again before the next masked instruction).
+    func join(label: engine.Label):
+        self.b.bind(label)
+        self.exec_dirty = true
+
+    ## Skip to `label` when no lane is active now.
+    func skip_if_idle(label: engine.Label):
+        self.sync()
+        if self.exec_now != no_register:
+            self.b.jump_if_none(self.exec_now, label)
+
+    # mark: Locals ============================================================================
+
+    func find_local(decl: ast.Node*) -> usize?:
+        var at = self.locals.length()
+        while at > 0:
+            at -= 1
+            if self.locals.at(at).decl == decl:
+                return at
+        return none
+
+    func is_varying(decl: ast.Node*) -> bool:
+        return contains(self.varying_decls.view(), decl)
+
+    func is_pinned(decl: ast.Node*) -> bool:
+        return contains(self.pinned_decls.view(), decl)
+
+    ## Declare `decl` holding `value`: pinned locals get registers of their own.
+    func declare(decl: ast.Node*, value: Value) -> !:
+        let pinned = self.is_pinned(decl)
+        var held = value
+        if pinned or value.borrowed:
+            held = self.copied(value)
+        held.uniform = value.uniform and not self.is_varying(decl)
+        try self.locals.append(Local(decl = decl, value = held, pinned = pinned, uniform = not self.is_varying(decl)))
+
+    ## The value of local `at`, marked borrowed when it may still change.
+    func local_value(at: usize) -> Value:
+        let local = self.locals.at(at)
+        var value = local.value
+        value.borrowed = local.pinned
+        value.uniform = local.uniform
+        return value
+
+    ## Write `value` (already of the local's shape) into local `at`, lane `lane` only when
+    ## `lane` is below 16.
+    func write_local(at: usize, value: Value, lane: usize = 16):
+        var local = self.locals.at(at)
+        if not local.pinned:
+            if lane < 16:
+                local.value.lanes[lane] = value.lanes[0]
+            else:
+                local.value.lanes = (self.copied(value) if value.borrowed else value).lanes
+            self.locals.set(at, local)
+            return
+        self.write_registers(local.value, value, lane, local.uniform)
+
+    ## Write `value` into `target`'s registers: every lane, or just `lane`; masked by the
+    ## exec mask unless the target is uniform.
+    func write_registers(target: Value, value: Value, lane: usize, uniform: bool):
+        if not uniform: self.sync()
+        for k in 0..<target.width:
+            if lane < 16 and k != lane:
+                continue
+            let source = value.lanes[0] if lane < 16 else value.lanes[k]
+            if uniform:
+                self.b.emit(.copy, target.kind, target.lanes[k], source, 0, 0)
+            else:
+                self.b.assign(target.lanes[k], source)
+
+## Whether `list` holds `node`.
+func contains(list: const (ast.Node*)[], node: ast.Node*) -> bool:
+    for item in list:
+        if item == node:
+            return true
+    return false
+
+## The engine kind of a scalar type (literals take i64 and f64 when nothing typed them).
+func scalar_kind(type_id: u32) -> Kind?:
+    if type_id == types.bool_id: return Kind.mask
+    if type_id == types.i32_id: return Kind.i32
+    if type_id == types.i64_id or type_id == types.isize_id or type_id == types.untyped_int_id: return Kind.i64
+    if type_id == types.u32_id: return Kind.u32
+    if type_id == types.u64_id or type_id == types.usize_id: return Kind.u64
+    if type_id == types.f32_id: return Kind.f32
+    if type_id == types.f64_id or type_id == types.untyped_float_id: return Kind.f64
+    return none

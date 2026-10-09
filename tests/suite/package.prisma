@@ -4,6 +4,10 @@ def package "luce_kernel_suite" {
     def dependency "luce-kernel" {
         str path = "../.."
     }
+    def dependency "luce-base" {
+        str owner = "dymokomi"
+        str path = "../../../luce-base"
+    }
     def dependency "luce-std" {
         str owner = "dymokomi"
         str path = "../../../luce-std"

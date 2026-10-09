@@ -1,0 +1,364 @@
+# Statements. Element-dependent conditions push an exec-mask frame and run each side on
+# its own lanes (skipped when a chunk has none); uniform ones are real jumps. Loops count
+# their rounds with a `loop_step`; `break`, `continue` and `return` clear lanes from the
+# masks that keep them running.
+
+extend Lowerer:
+    func statements(list: ast.Node*?) -> !:
+        var cursor = list
+        while let s = cursor:
+            try self.statement(s)
+            cursor = s.next
+
+    func statement(s: ast.Node*) -> !:
+        match s.kind:
+            .block: try self.statements(s.body)
+            .let_, .var_: try self.declaration(s)
+            .assign: try self.assignment(s)
+            .if_: try self.branch(s)
+            .while_: try self.while_loop(s)
+            .for_: try self.for_loop(s)
+            .match_: try self.match_statement(s)
+            .return_: try self.return_statement(s)
+            .break_: try self.leave_loop(s, true)
+            .continue_: try self.leave_loop(s, false)
+            .expr_stmt:
+                let call = s.left else return
+                _ = try self.expression(call)
+            _: try self.fail(s, "this statement is not available in a kernel")
+
+    func declaration(s: ast.Node*) -> !:
+        let (kind, width) = try self.shape_or_fail(s, s.type_id)
+        var value = self.zero(kind, width, s.type_id)
+        if let initial = s.left:
+            value = try self.converted(try self.expression(initial), s.type_id, initial)
+        try self.declare(s, value)
+
+    # mark: Assignment ========================================================================
+
+    func assignment(s: ast.Node*) -> !:
+        let place = s.left else return
+        let operand = s.right else return
+        var value = try self.expression(operand)
+        if s.text != "=":
+            let current = try self.expression(place)
+            let symbol = (str)s.text.bytes[..<s.text.length - 1]
+            value = try self.operate(s, symbol, current, try self.converted_operand(value, current, operand))
+        try self.store(place, try self.converted(value, place.type_id, operand))
+
+    ## Write `value` (of the place's type) to a local, a column field, or a lane of either.
+    func store(place: ast.Node*, value: Value) -> !:
+        match place.kind:
+            .name:
+                let decl = place.resolved else return
+                let at = self.find_local(decl) else return try self.fail(place, "this name cannot be assigned in a kernel")
+                self.write_local(at, value)
+            .member:
+                let binding = self.binding_of(place.left, place.text) else return try self.fail(place, "this member cannot be assigned in a kernel")
+                if binding.role != .field:
+                    return try self.fail(place, "this member cannot be assigned")
+                try self.write_column(place, binding.column, value, 16)
+            .index:
+                let owner = place.left else return
+                let index = place.body else return
+                if let constant = self.c.exact_integer(index, 64, true):
+                    try self.store_lane(owner, value, try self.lane_number(index, constant, owner))
+                    return
+                try self.store_indexed(owner, index, value)
+            _:
+                try self.fail(place, "this place cannot be assigned in a kernel")
+
+    ## Write `value` into lane `lane` of the local or column `owner` names.
+    func store_lane(owner: ast.Node*, value: Value, lane: usize) -> !:
+        if owner.kind == ast.Kind.name:
+            let decl = owner.resolved else return
+            let at = self.find_local(decl) else return try self.fail(owner, "this name cannot be assigned in a kernel")
+            self.write_local(at, value, lane)
+            return
+        if owner.kind == ast.Kind.member:
+            if let binding = self.binding_of(owner.left, owner.text):
+                if binding.role == .field:
+                    try self.write_column(owner, binding.column, value, lane)
+                    return
+        try self.fail(owner, "this place cannot be assigned in a kernel")
+
+    ## Write `value` into the lane an element-dependent index picks (`v[i] = x`).
+    func store_indexed(owner: ast.Node*, index: ast.Node*, value: Value) -> !:
+        let target = try self.expression(owner)
+        let at = try self.expression(index)
+        if not target.borrowed:
+            return try self.fail(owner, "this place cannot be assigned in a kernel")
+        self.sync()
+        self.b.place(target.lanes[0], target.width, at.lanes[0], value.lanes[0])
+
+    ## The lane a constant index names, checked against the value's width.
+    func lane_number(index: ast.Node*, constant: i64, owner: ast.Node*) -> usize!:
+        let (kind, width) = try self.shape_or_fail(owner, owner.type_id)
+        _ = kind
+        if constant < 0 or (usize)constant >= width:
+            try self.fail(index, "index out of bounds")
+        return (usize)constant
+
+    # mark: Columns ===========================================================================
+
+    func column_index(node: ast.Node*, name: str) -> usize!:
+        for (at, column) in self.columns.view().indexed():
+            if column.name == name:
+                return at
+        try self.fail(node, "a column the scan did not see")
+        return 0
+
+    ## Write a column's value: every lane, or lane `lane`.
+    func write_column(node: ast.Node*, name: str, value: Value, lane: usize) -> !:
+        let at = try self.column_index(node, name)
+        var use = self.columns.at(at)
+        if use.pinned:
+            self.write_registers(use.value, value, lane, false)
+            return
+        if lane < 16:
+            use.value.lanes[lane] = value.lanes[0]
+        else:
+            use.value.lanes = (self.copied(value) if value.borrowed else value).lanes
+        self.columns.set(at, use)
+
+    # mark: Branches ==========================================================================
+
+    func branch(s: ast.Node*) -> !:
+        let condition = s.left else return
+        let decision = try self.expression(condition)
+        if decision.uniform:
+            let otherwise = self.b.label()
+            let done = self.b.label()
+            self.b.jump_if_false(decision.lanes[0], otherwise)
+            if let then_block = s.body: try self.statement(then_block)
+            self.b.jump(done)
+            self.join(otherwise)
+            if let other = s.right: try self.statement(other)
+            self.join(done)
+            return
+        try self.masked(decision.lanes[0], s.body)
+        if let other = s.right:
+            try self.masked(self.b.unary(.bnot, decision.lanes[0]), other)
+        else:
+            self.exec_dirty = true
+
+    ## Run `body` on the active lanes in `mask`, skipping it when a chunk has none.
+    func masked(mask: u16, body: ast.Node*?) -> !:
+        let skip = self.b.label()
+        try self.push_frame(mask)
+        self.skip_if_idle(skip)
+        if let statement = body: try self.statement(statement)
+        self.pop_frame()
+        self.join(skip)
+
+    # mark: Loops =============================================================================
+
+    func while_loop(s: ast.Node*) -> !:
+        try self.loop_over(s, s.left, none)
+
+    ## `for x in a..<b`, `a..=b`, or over the lanes of a vector or array.
+    func for_loop(s: ast.Node*) -> !:
+        let binding = s.left else return
+        let range = s.right else return
+        let (kind, width) = try self.shape_or_fail(binding, binding.type_id)
+        if width != 1:
+            return try self.fail(binding, "a loop variable must be a scalar")
+        var counting = Counting(binding = binding, counter = self.nothing(), limit = self.nothing(), inclusive = false, source = self.nothing(), over_lanes = false)
+        var first: Value
+        if range.kind == ast.Kind.binary and (range.text == "..<" or range.text == "..="):
+            let low = range.left else return
+            let high = range.right else return
+            first = try self.converted(try self.expression(low), binding.type_id, low)
+            counting.limit = try self.converted(try self.expression(high), binding.type_id, high)
+            counting.inclusive = range.text == "..="
+        else:
+            counting.source = try self.expression(range)
+            if counting.source.kind != kind:
+                return try self.fail(range, "a loop over lanes of another type")
+            counting.over_lanes = true
+            first = self.scalar(.i64, self.b.constant_i64(0), true, types.i64_id)
+            counting.limit = self.scalar(.i64, self.b.constant_i64((i64)counting.source.width), true, types.i64_id)
+        # The counter is written on every lane (only active lanes read it), so a loop with
+        # uniform bounds keeps a uniform counter and its test stays a jump.
+        let counter = self.b.register(first.kind)
+        self.b.emit(.copy, first.kind, counter, first.lanes[0], 0, 0)
+        counting.counter = self.scalar(first.kind, counter, first.uniform and counting.limit.uniform, first.type_id)
+        try self.loop_over(s, none, &counting)
+
+    ## A loop: test `condition` (or the counter) at the top of every round, run the body,
+    ## count the round, go round again.
+    func loop_over(s: ast.Node*, condition: ast.Node*?, counting: Counting*?) -> !:
+        let exits = has_breaks(s.body, s.text)
+        let continues = has_continues(s.body, s.text)
+        var record = Loop(label = s.text, alive = no_register, going = no_register)
+        let slot = self.b.loop_slot()
+        let varying_test = condition != none and self.varies(condition)
+        if exits or varying_test:
+            record.alive = self.b.register(.mask)
+            self.b.emit(.copy, .mask, record.alive, self.b.constant_mask(true), 0, 0)
+            try self.push_frame(record.alive)
+        if continues:
+            record.going = self.b.register(.mask)
+        try self.loops.append(record)
+        self.b.loop_start(slot)
+        let top = self.b.label()
+        let done = self.b.label()
+        self.join(top)
+        if continues:
+            self.b.emit(.copy, .mask, record.going, self.b.constant_mask(true), 0, 0)
+            try self.push_frame(record.going)
+        var decision: Value
+        if let expression = condition:
+            decision = try self.expression(expression)
+        elif let count = counting:
+            let compare: Op = .le if count.inclusive else .lt
+            let uniform = count.counter.uniform
+            decision = self.scalar(.mask, self.b.compare(compare, count.counter.lanes[0], count.limit.lanes[0]), uniform, types.bool_id)
+        else:
+            decision = self.scalar(.mask, self.b.constant_mask(true), true, types.bool_id)
+        if decision.uniform:
+            self.b.jump_if_false(decision.lanes[0], done)
+        else:
+            self.b.emit(.copy, .mask, record.alive, self.b.binary(.band, record.alive, decision.lanes[0]), 0, 0)
+            self.exec_dirty = true
+        self.skip_if_idle(done)
+        let locals_before = self.locals.length()
+        if let count = counting:
+            var element = count.counter
+            element.borrowed = false
+            if count.over_lanes:
+                let picked = self.b.pick(self.consecutive(count.source), count.source.width, count.counter.lanes[0])
+                element = self.scalar(count.source.kind, picked, count.source.uniform and count.counter.uniform, count.binding.type_id)
+            try self.declare(count.binding, element)
+        try self.statements(s.body)
+        self.locals.truncate(locals_before)
+        if continues:
+            self.pop_frame()
+        if let count = counting:
+            let counter = count.counter.lanes[0]
+            let one = self.b.constant(count.counter.kind, 1)
+            self.b.emit(.copy, count.counter.kind, counter, self.b.binary(.wadd, counter, one), 0, 0)
+        self.sync()
+        self.b.loop_step(slot, self.exec_now)
+        self.b.jump(top)
+        self.join(done)
+        self.loops.truncate(self.loops.length() - 1)
+        if exits or varying_test:
+            self.pop_frame()
+
+    ## `break` clears the active lanes from the loop's `alive` mask, `continue` from its
+    ## `going` mask; the rest of the round runs without them.
+    func leave_loop(s: ast.Node*, breaking: bool) -> !:
+        var at = self.loops.length()
+        while at > 0:
+            at -= 1
+            let found = self.loops.at(at)
+            if s.text.length > 0 and found.label != s.text:
+                continue
+            let mask = found.alive if breaking else found.going
+            if mask == no_register:
+                return try self.fail(s, "internal: a loop without the mask its exits need")
+            self.sync()
+            self.b.assign(mask, self.b.constant_mask(false))
+            if breaking and found.going != no_register:
+                self.b.assign(found.going, self.b.constant_mask(false))
+            self.exec_dirty = true
+            return
+        try self.fail(s, "a break or continue outside a loop")
+
+    # mark: Match =============================================================================
+
+    ## `match` on an integer: each arm runs on the lanes its patterns take that no earlier
+    ## arm took.
+    func match_statement(s: ast.Node*) -> !:
+        let subject_node = s.left else return
+        let subject = try self.expression(subject_node)
+        if subject.width != 1 or subject.kind == .f32 or subject.kind == .f64:
+            return try self.fail(subject_node, "match on this type is not available in a kernel")
+        let remaining = self.b.register(.mask)
+        self.b.emit(.copy, .mask, remaining, self.b.constant_mask(true), 0, 0)
+        var arms = s.body
+        while let arm = arms:
+            var taken = self.b.constant_mask(false)
+            var patterns = arm.left
+            while let pattern = patterns:
+                taken = self.b.binary(.bor, taken, try self.pattern(pattern, subject))
+                patterns = pattern.next
+            taken = self.b.binary(.band, taken, remaining)
+            try self.push_frame(taken)
+            if let guard_expression = arm.right:
+                let guard_value = try self.expression(guard_expression)
+                self.pop_frame()
+                taken = self.b.binary(.band, taken, guard_value.lanes[0])
+                try self.push_frame(taken)
+            self.sync()
+            self.b.emit(.copy, .mask, remaining, self.b.binary(.band, remaining, self.b.unary(.bnot, taken)), 0, 0)
+            let skip = self.b.label()
+            self.skip_if_idle(skip)
+            if let arm_body = arm.body: try self.statement(arm_body)
+            self.pop_frame()
+            self.join(skip)
+            arms = arm.next
+
+    ## The lanes a pattern takes.
+    func pattern(p: ast.Node*, subject: Value) -> u16!:
+        if p.has(ast.flag_wildcard):
+            return self.b.constant_mask(true)
+        let low_node = p.left else return self.b.constant_mask(true)
+        let low = try self.converted(try self.expression(low_node), subject.type_id, low_node)
+        if let high_node = p.right:
+            let high = try self.converted(try self.expression(high_node), subject.type_id, high_node)
+            let above = self.b.compare(.ge, subject.lanes[0], low.lanes[0])
+            return self.b.binary(.band, above, self.b.compare(.le, subject.lanes[0], high.lanes[0]))
+        return self.b.compare(.eq, subject.lanes[0], low.lanes[0])
+
+    # mark: Return ============================================================================
+
+    func return_statement(s: ast.Node*) -> !:
+        let at = self.functions.length() - 1
+        let function = self.functions.at(at)
+        if let value_node = s.left:
+            let value = try self.converted(try self.expression(value_node), function.result.type_id, value_node)
+            self.write_registers(function.result, value, 16, false)
+        if function.live != no_register:
+            self.sync()
+            self.b.assign(function.live, self.b.constant_mask(false))
+            for loop in self.loops.view():
+                if loop.alive != no_register: self.b.assign(loop.alive, self.b.constant_mask(false))
+            self.exec_dirty = true
+
+## A `for` loop's counter: its register, its limit, and the lanes it walks when it runs
+## over a vector or array.
+struct Counting:
+    var binding: ast.Node*
+    var counter: Value
+    var limit: Value
+    var inclusive: bool
+    var source: Value
+    var over_lanes: bool
+
+## Whether a loop body (of a loop labeled `label`) has a `break` that leaves it: its own,
+## or a nested loop's naming its label; or a `return`.
+func has_breaks(list: ast.Node*?, label: str) -> bool:
+    return has_jump(list, ast.Kind.break_, label, false)
+
+func has_continues(list: ast.Node*?, label: str) -> bool:
+    return has_jump(list, ast.Kind.continue_, label, false)
+
+func has_jump(list: ast.Node*?, kind: ast.Kind, label: str, nested: bool) -> bool:
+    var cursor = list
+    while let s = cursor:
+        if s.kind == ast.Kind.return_:
+            return true
+        if s.kind == kind and (not nested or (label.length > 0 and s.text == label)):
+            return true
+        let inner = nested or s.kind == ast.Kind.while_ or s.kind == ast.Kind.for_
+        if has_jump(s.body, kind, label, inner) or has_jump(s.right, kind, label, nested):
+            return true
+        if s.kind == ast.Kind.match_:
+            var arms = s.body
+            while let arm = arms:
+                if has_jump(arm.body, kind, label, nested): return true
+                arms = arm.next
+        cursor = s.next
+    return false
