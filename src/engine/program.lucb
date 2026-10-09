@@ -107,6 +107,26 @@ pub struct Program:
     pub func uniforms() -> const UniformSlot[]:
         return self.uniform_slots.view()
 
+    ## The constant register `register` holds, or none (it is computed, or a uniform).
+    pub func constant_of(register: u16) -> Scalar?:
+        for preset in self.presets.view():
+            if preset.register == register:
+                return self.scalars.at((usize)preset.scalar)
+        return none
+
+    ## Whether some call of the builtin named `name` may pass `value` as its argument
+    ## lane `argument`: the lane is that constant, or anything not constant. A host uses
+    ## it to prepare before a run what such calls need (`k.input(1).nearpoints` needs
+    ## input 1's point grid) instead of building it lazily inside the run.
+    pub func may_pass(name: str, argument: usize, value: i64) -> bool:
+        for site in self.sites.view():
+            if site.builtin.name != name or argument >= site.builtin.argument_count:
+                continue
+            let given = self.constant_of(site.arguments[argument]) else return true
+            if given.bits == (u64)value:
+                return true
+        return false
+
     ## Whether `verify` accepted it; only a verified program runs.
     pub func is_verified() -> bool:
         return self.verified

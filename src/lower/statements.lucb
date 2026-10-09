@@ -207,7 +207,9 @@ extend Lowerer:
         let continues = has_continues(s.body, s.text)
         var record = Loop(label = s.text, alive = no_register, going = no_register)
         let slot = self.b.loop_slot()
-        let varying_test = condition != none and self.varies(condition)
+        var varying_test = condition != none and self.varies(condition)
+        if let count = counting:
+            varying_test = varying_test or not count.counter.uniform
         if exits or varying_test:
             record.alive = self.b.register(.mask)
             self.b.emit(.copy, .mask, record.alive, self.b.constant_mask(true), 0, 0)

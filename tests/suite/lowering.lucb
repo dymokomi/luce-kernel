@@ -267,6 +267,14 @@ pub func run_all() -> !:
         same("a setter in a branch", columns.weighed[at], -1.0 if at % 2 == 0 else columns.masses[at], at)
     print("ok    lowering a setter inside a branch")
 
+    var bounded = try compiled_or_trap(root, &host, no_header, "var total: i32 = 0\nfor i in 0..<p.ptnum % 4:\n    total += i + 1\np.set_f32(\"mass\", (f32)total)\n")
+    defer bounded.destroy()
+    assert(try columns.run(&bounded, common.no_uniforms()) == none)
+    for at in 0..<points:
+        let n = at % 4
+        same("a for loop whose bound differs per element", columns.weighed[at], (f32)(n * (n + 1) // 2), at)
+    print("ok    lowering a for loop with an element-dependent bound")
+
     var handles = try compiled_or_trap(root, &host, no_header, "let g = k.input(1)\nlet h = g.probe(p.P)\np.Cd = [(f32)g.count(), g.value(p.ptnum, \"ab\"), h.uv[1] + h.distance, (f32)h.prim]\np.set_f32(\"mass\", (f32)k.input(0).count())\n")
     defer handles.destroy()
     assert(try columns.run(&handles, common.no_uniforms()) == none)
@@ -276,6 +284,14 @@ pub func run_all() -> !:
         same("a record result", columns.colors[at * 3 + 2], columns.positions[at * 3 + 1] + 1.5, at)
         same("an API value inline", columns.weighed[at], 100.0, at)
     print("ok    lowering API values, text arguments and record results")
+    # What a host can prepare before the run: the inputs each builtin may be called on.
+    assert(handles.program.may_pass("probe", 0, 1) and not handles.program.may_pass("probe", 0, 0))
+    assert(handles.program.may_pass("count", 0, 0) and handles.program.may_pass("count", 0, 1))
+    assert(not handles.program.may_pass("count", 0, 2) and not handles.program.may_pass("absent", 0, 0))
+    var varying = try compiled_or_trap(root, &host, no_header, "p.Cd = [(f32)k.input(p.ptnum % 2).count(), 0.0, 0.0, 0.0]\n")
+    defer varying.destroy()
+    assert(varying.program.may_pass("count", 0, 7))
+    print("ok    may_pass: constant and varying API numbers")
 
     var faulting = try compiled_or_trap(root, &host, no_header, "let x = p.P[0]\nlet q = 100 // (p.ptnum - 10)\np.Cd = [x, (f32)q, 0.0, 0.0]\n")
     defer faulting.destroy()

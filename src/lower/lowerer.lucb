@@ -245,8 +245,8 @@ struct Lowerer:
         let first = self.b.record(value.kinds[..<value.width]) if value.mixed else self.b.vector(value.kind, value.width)
         for k in 0..<value.width:
             let kind = value.lane_kind(k)
-            copy.lanes[k] = first + (u16)k
-            self.b.emit(.copy, kind, first + (u16)k, value.lanes[k], 0, 0)
+            copy.lanes[k] = first +% (u16)k
+            self.b.emit(.copy, kind, first +% (u16)k, value.lanes[k], 0, 0)
         copy.borrowed = false
         return copy
 
@@ -254,7 +254,7 @@ struct Lowerer:
     func consecutive(value: Value) -> u16:
         var ordered = true
         for k in 1..<value.width:
-            if value.lanes[k] != value.lanes[0] + (u16)k:
+            if value.lanes[k] != value.lanes[0] +% (u16)k:
                 ordered = false
         if ordered and not value.borrowed:
             return value.lanes[0]

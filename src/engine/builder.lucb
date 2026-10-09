@@ -27,6 +27,10 @@ pub struct Builder:
     pub func has_failed() -> bool:
         return self.failed
 
+    ## Why the first refused call was refused ("" when none was).
+    pub func refusal() -> str:
+        return self.failure
+
     # mark: Registers ========================================================================
 
     ## A fresh register of `kind`.
@@ -245,6 +249,10 @@ pub struct Builder:
         return dst
 
     ## Base's C cast `(kind)a`: truncating, saturating, never faulting.
+    ## The constant `register` holds, or none (it is computed, or a uniform).
+    pub func constant_of(register: u16) -> Scalar?:
+        return self.program.constant_of(register)
+
     pub func cast(a: u16, kind: Kind) -> u16:
         let dst = self.register(kind)
         self.emit(.cast, kind, dst, a, 0, 0)

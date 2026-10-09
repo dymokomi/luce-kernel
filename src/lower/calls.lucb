@@ -174,7 +174,17 @@ extend Lowerer:
                 let number = try self.expression(number_node)
                 if number.width != 1 or not number.kind.is_integer():
                     return try self.fail_value(number_node, "an API value is named by an integer")
-                var value = self.scalar(.i64, self.b.cast(number.lanes[0], .i64) if number.kind != .i64 else number.lanes[0], number.uniform, e.type_id)
+                # A literal number stays a constant, so the host can see which input a
+                # call names before the run (`Program.may_pass`).
+                var register = number.lanes[0]
+                if number.kind != .i64:
+                    var folded = false
+                    if let known = self.b.constant_of(number.lanes[0]):
+                        if known.bits < 0x80000000:
+                            register = self.b.constant_i64((i64)known.bits)
+                            folded = true
+                    if not folded: register = self.b.cast(number.lanes[0], .i64)
+                var value = self.scalar(.i64, register, number.uniform, e.type_id)
                 value.handle = true
                 return value
             _:
@@ -223,6 +233,10 @@ extend Lowerer:
         self.position(e)
         self.sync()
         let first = self.b.call_with_texts(builtin, registers[..<count], texts[..<text_count])
+        if first == no_register:
+            var room: u8[300]
+            let text = strings.format(room, f"internal: the program was refused: {self.b.refusal()}") else "internal: the program was refused"
+            return try self.fail_value(e, text)
         if e.type_id == types.unit_id:
             return self.nothing()
         if let shape = self.record(e.type_id):
@@ -233,14 +247,14 @@ extend Lowerer:
             for k in 0..<shape.width:
                 if shape.kinds[k] != builtin.results[k]:
                     return try self.fail_value(e, "a builtin whose results differ from the method's type")
-                result.lanes[k] = first + (u16)k
+                result.lanes[k] = first +% (u16)k
             return result
         let (kind, width) = try self.shape_or_fail(e, e.type_id)
         if width != builtin.result_count or kind != builtin.results[0]:
             return try self.fail_value(e, "a builtin whose results differ from the method's type")
         var result = self.scalar(kind, first, false, e.type_id)
         result.width = width
-        for k in 0..<width: result.lanes[k] = first + (u16)k
+        for k in 0..<width: result.lanes[k] = first +% (u16)k
         return result
 
     # mark: lib and math ======================================================================
@@ -273,7 +287,7 @@ extend Lowerer:
             let first = self.b.normalize(self.consecutive(values[0]), values[0].width)
             var result = self.scalar(kind, first, uniform, e.type_id)
             result.width = width
-            for k in 0..<width: result.lanes[k] = first + (u16)k
+            for k in 0..<width: result.lanes[k] = first +% (u16)k
             return result
         if name == "lerp" or name == "lerp64" or name == "clamp" or name == "clamp64" or name == "smooth" or name == "smooth64" or name == "fit01" or name == "fit01_64":
             let op: Op = .lerp if name.bytes[0] == 'l' else (.clamp if name.bytes[0] == 'c' else (.smooth if name.bytes[0] == 's' else .fit01))
