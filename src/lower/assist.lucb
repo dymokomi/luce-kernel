@@ -1,0 +1,260 @@
+# Editor help for a snippet: what may come at the caret (`complete`) and what the word
+# there is (`hover`). Members of API values, the lib, luce-std's math modules, the header's
+# helpers, the locals in scope and Base's keywords, each with its signature and `##` doc.
+# Half-typed code still gets help: locals take their types from a check with the caret's
+# line set aside, the last check that passed, or their declarations read as text.
+
+## One completion: the name to insert, what it is, its signature or type, and its doc.
+pub struct Item:
+    pub let label: str
+    pub let kind: ItemKind
+    pub let detail: str
+    pub let doc: str
+
+## What may come at the caret, and the column (1-based, in bytes) where the word being
+## completed starts, which the chosen label replaces up to the caret.
+pub struct Completion:
+    pub var start: u32
+    var list: collections.List[Item]
+    var texts: collections.TextPool
+
+    ## The items, members first after a dot; locals, the header's helpers, lib functions,
+    ## types and keywords otherwise.
+    pub func items() -> const Item[]:
+        return self.list.view()
+
+    ## Give back the items and their texts.
+    pub func destroy():
+        self.list.destroy()
+        self.texts.destroy()
+
+    func add(label: str, kind: ItemKind, detail: str, doc: str) -> !:
+        for item in self.list.view():
+            if item.label == label: return
+        try self.list.append(Item(label = try self.texts.keep_text(label.bytes), kind = kind, detail = try self.texts.keep_text(detail.bytes), doc = try self.texts.keep_text(doc.bytes)))
+
+## The keywords a snippet may start a word with.
+let keywords: str[22] = ["let", "var", "if", "elif", "else", "for", "in", "while", "match", "return", "break", "continue", "and", "or", "not", "true", "false", "none", "func", "struct", "const", "static"]
+
+## The completions at line `line`, column `column` (1-based, in bytes) of `part` of the
+## snippet, checked in `root` (laid out by `write_root` and the host) as `compile` does.
+## `host_texts` are the host's stub modules, read for its API types and their docs.
+pub func complete(root: str, run_over: RunOver, header: str, body: str, part: Part, line: u32, column: u32, host_texts: const str[]) -> Completion!:
+    var completion = Completion(start = column)
+    errdefer completion.destroy()
+    var help = try Help.of(root, run_over, header, body, part, line, column, host_texts, false)
+    defer help.destroy()
+    let place = help.place else return completion
+    if place.in_comment_or_text(): return completion
+    let start = word_start(place.text, place.offset)
+    completion.start = (u32)(start - place.line_start + 1)
+    let prefix = (str)place.text.bytes[start..<place.offset]
+    if start > 0 and place.text.bytes[start - 1] == '.':
+        # Members of what is before the dot.
+        let owner = try help.chain_owner(start - 1) else return completion
+        for decl in help.index.decls.view():
+            if decl.owner == owner.name and decl.on_type == owner.on_type and strings.starts_with(decl.name, prefix):
+                try completion.add(decl.name, decl.kind, decl.detail, decl.doc)
+        return completion
+    if start > 0 and digit(place.text.bytes[start - 1]): return completion
+    for local in help.locals.view():
+        if strings.starts_with(local.name, prefix): try completion.add(local.name, .local, try help.local_type(local.name), "")
+    for parameter in help.parameters.view():
+        if strings.starts_with(parameter.name, prefix): try completion.add(parameter.name, .local, parameter.written, help.type_doc(parameter.written))
+    for decl in help.index.decls.view():
+        if decl.owner == "" and strings.starts_with(decl.name, prefix): try completion.add(decl.name, decl.kind, decl.detail, decl.doc)
+    for module in ["math", "math32"]:
+        if strings.starts_with(module, prefix): try completion.add(module, .type_, "module", "luce-std's math functions, in f64 (math) and f32 (math32)")
+    for keyword in keywords:
+        if strings.starts_with(keyword, prefix): try completion.add(keyword, .keyword, "", "")
+    return completion
+
+## What the word at line `line`, column `column` of `part` is: a signature or type, then
+## its doc; "" when nothing there has help. Into `out`.
+pub func hover(root: str, run_over: RunOver, header: str, body: str, part: Part, line: u32, column: u32, host_texts: const str[], out: collections.List[u8]*) -> !:
+    var help = try Help.of(root, run_over, header, body, part, line, column, host_texts, true)
+    defer help.destroy()
+    let place = help.place else return
+    if place.in_comment_or_text(): return
+    let start = word_start(place.text, place.offset)
+    let end = word_end(place.text, place.offset)
+    if start == end or not name_byte(place.text.bytes[start]): return
+    let word = (str)place.text.bytes[start..<end]
+    if start > 0 and place.text.bytes[start - 1] == '.':
+        let owner = try help.chain_owner(start - 1) else return
+        let decl = help.index.find(owner.name, word) else return
+        try help_text(out, decl.detail, decl.doc)
+        return
+    for local in help.locals.view():
+        if local.name == word:
+            let typed = try help.local_type(word)
+            var room: u8[300]
+            try help_text(out, try strings.format(room, f"{word}: {typed}" if typed.length > 0 else f"{word}"), "")
+            return
+    for parameter in help.parameters.view():
+        if parameter.name == word:
+            var room: u8[300]
+            try help_text(out, try strings.format(room, f"{word}: {parameter.written}"), help.type_doc(parameter.written))
+            return
+    if let decl = help.index.find("", word):
+        try help_text(out, decl.detail, decl.doc)
+
+## `detail`, then `doc` on a line of its own.
+func help_text(out: collections.List[u8]*, detail: str, doc: str) -> !:
+    try append_text(out, detail)
+    if doc.length > 0:
+        try out.append('\n')
+        try append_text(out, doc)
+
+func digit(byte: u8) -> bool:
+    return byte >= '0' and byte <= '9'
+
+## What a chain names: a struct or module whose members follow a dot, and whether the
+## chain is the type itself (`Mat3.` lists its static functions).
+struct Owner:
+    let name: str
+    let on_type: bool
+
+## Everything help needs about the snippet at the caret.
+struct Help:
+    var index: Index
+    var place: Place?
+    var locals: collections.List[ScopeName]
+    var parameters: collections.List[ScopeName]
+    var typed: collections.List[TypedLocal]
+    var texts: collections.TextPool
+
+    ## For hover (`whole`) the caret's line counts, and the check reads it as it is; for a
+    ## completion it is half-typed, so set aside.
+    static func of(root: str, run_over: RunOver, header: str, body: str, part: Part, line: u32, column: u32, host_texts: const str[], whole: bool) -> Help!:
+        var help = Help(index = try Index.of(host_texts), place = none)
+        errdefer help.destroy()
+        try help.index.read(header, "", false, true)
+        let text = header if part == .header else body
+        help.place = Place.of(text, line, column)
+        let place = help.place else return help
+        try lexical_locals(&place, part == .header, whole, &help.locals)
+        # The entry function's parameters (`p: Point*, k: const Kernel*`).
+        if part == .body:
+            var pieces = Pieces(text = run_over.parameters)
+            while let piece = pieces.next():
+                let parameter = strings.trim(piece)
+                let colon = strings.find(parameter, ":") else continue
+                try help.parameters.append(ScopeName(name = leading_name(parameter), line = 0, indent = 0, block_only = false, written = base_type((str)parameter.bytes[colon + 1..]), value = ""))
+        try checked_locals(root, run_over, header, body, part, 0 if whole else line, help.locals.view(), &help.texts, &help.typed)
+        return help
+
+    func destroy():
+        self.index.destroy()
+        self.locals.destroy()
+        self.parameters.destroy()
+        self.typed.destroy()
+        self.texts.destroy()
+
+    ## The doc of the struct a type names, or "".
+    func type_doc(written: str) -> str:
+        let decl = self.index.find("", base_type(written)) else return ""
+        return decl.doc
+
+    ## A local's type: from the check (the nearest declaration above the caret), else the
+    ## text of its declaration; "" when neither says.
+    func local_type(name: str) -> str!:
+        return try self.local_type_at(name, 0)
+
+    func local_type_at(name: str, depth: u32) -> str!:
+        var best: ScopeName? = none
+        for local in self.locals.view():
+            if local.name == name: best = local
+        let local = best else return ""
+        var fallback: str = ""
+        for typed in self.typed.view():
+            if typed.name != name: continue
+            if typed.line == local.line: return typed.type_text
+            if typed.line == 0: fallback = typed.type_text
+        if local.written.length > 0: return base_type(local.written)
+        if fallback.length > 0: return fallback
+        if local.value.length > 0 and depth < 4: return base_type(try self.infer(local.value, depth + 1))
+        return ""
+
+    ## The type of an expression as its text starts: a chain's, a literal's or a cast's.
+    func infer(expression: str, depth: u32) -> str!:
+        let text = strings.trim(expression)
+        if text.length == 0 or depth > 4: return ""
+        let first = text.bytes[0]
+        if first == '-' or first == '(' and not strings.starts_with(text, "(f") and not strings.starts_with(text, "(i"):
+            return try self.infer((str)text.bytes[1..], depth + 1)
+        if first == '(':
+            let close = strings.find(text, ")") else return ""
+            return (str)text.bytes[1..<close]
+        if first == '"': return "str"
+        if first == '[': return "f32[2]" if count_items(text) == 2 else "f32[4]"
+        if digit(first):
+            var end: usize = 0
+            while end < text.length and (digit(text.bytes[end]) or text.bytes[end] == '.' or text.bytes[end] == '_'): end += 1
+            return "f64" if strings.contains((str)text.bytes[..<end], ".") else "i64"
+        var chain = collections.List[Segment]()
+        defer chain.destroy()
+        if not try chain_after(text, &chain): return ""
+        return try self.chain_type(chain.view(), depth + 1)
+
+    ## The struct or module before the dot at `dot`.
+    func chain_owner(dot: usize) -> Owner?!:
+        let place = self.place else return none
+        var chain = collections.List[Segment]()
+        defer chain.destroy()
+        if not try chain_before(place.text, dot, &chain): return none
+        let links = chain.view()
+        let root = links[0]
+        if links.length == 1 and not root.called and root.indexes == 0:
+            if root.name == "math" or root.name == "math32": return Owner(name = root.name, on_type = false)
+            if self.index.is_type(root.name) and not self.declared(root.name): return Owner(name = root.name, on_type = true)
+        let typed = try self.chain_type(links, 0)
+        if typed.length == 0: return none
+        return Owner(name = base_type(typed), on_type = false)
+
+    ## Whether `name` is a local or parameter here.
+    func declared(name: str) -> bool:
+        for local in self.locals.view():
+            if local.name == name: return true
+        for parameter in self.parameters.view():
+            if parameter.name == name: return true
+        return false
+
+    ## The type a chain ends with, "" when some link is unknown.
+    func chain_type(links: const Segment[], depth: u32) -> str!:
+        var current: str = ""
+        var owner: str = ""
+        for (at, link) in links.indexed():
+            if at == 0:
+                current = try self.root_type(link, depth)
+                if current.length == 0 and link.called and self.index.is_type(link.name): current = link.name
+            else:
+                let decl = self.index.find(owner, link.name) else return ""
+                current = decl.result
+            for _ in 0..<link.indexes: current = item_type(current)
+            if current.length == 0: return ""
+            owner = base_type(current)
+        return current
+
+    ## The type of a chain's first link: a local, a parameter, a function's result, or a
+    ## module's or type's member reached through `math32.`/`Mat3.` (when it is followed).
+    func root_type(link: Segment, depth: u32) -> str!:
+        if link.called:
+            let decl = self.index.find("", link.name) else return ""
+            return decl.result if decl.kind == .function else ""
+        for parameter in self.parameters.view():
+            if parameter.name == link.name: return parameter.written
+        if self.declared(link.name):
+            return try self.local_type_at(link.name, depth + 1)
+        if link.name == "math" or link.name == "math32" or self.index.is_type(link.name): return link.name
+        return ""
+
+## How many items a bracketed list holds.
+func count_items(text: str) -> usize:
+    let close = closing(text, 0, '[', ']') else return 0
+    var pieces = Pieces(text = (str)text.bytes[1..<close - 1])
+    var count: usize = 0
+    while let piece = pieces.next():
+        _ = piece
+        count += 1
+    return count

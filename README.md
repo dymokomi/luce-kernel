@@ -45,7 +45,11 @@ Three public modules:
   tree. A `Host` says what its API members are (column fields, accessors by literal name,
   the element number, uniforms and parameters, builtins). Element-dependent conditions
   become exec masks, uniform ones jumps; helpers in the header are inlined. Every
-  diagnostic and fault maps back to the user's line and column.
+  diagnostic and fault maps back to the user's line and column. For an editor,
+  `complete` lists what may come at the caret (members after a dot, else locals, the
+  header's helpers, lib functions, types and keywords, each with its signature and `##`
+  doc) and `hover` gives the word's signature and doc; both read the lib's and the host's
+  stub texts, so the docs live once, and still help on half-typed code.
 
 ```luce
 from luce_kernel import lower
@@ -62,6 +66,8 @@ let points = RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*"
 var compiled = try lower.compile(root, points, header, "p.P[1] += math32.sin(p.P[0] * 4.0) * 0.1", &host)
 defer compiled.destroy()
 for d in compiled.diagnostics(): show(d.part, d.line, d.column, d.message)
+var items = try lower.complete(root, points, header, "p.", .body, 1, 3, stub_texts)
+defer items.destroy()                          # items.items(): label, kind, detail, doc
 ```
 
 The IR can also be built by hand:

@@ -1,6 +1,7 @@
 ## luce-kernel's heavier checks, run by `luc test` as a program: the fault suite, the
 ## benchmark snippets against plain Base, the fuzzer, and allocation failures.
 ## `--bench` runs the benchmarks instead (tests/bench/run.py).
+import assist
 import bench
 import conformance
 import faults
@@ -17,4 +18,5 @@ pub func main(arguments: str[]) -> i32!:
     try fuzz.run_all()
     try lowering.run_all()
     try library.run_all()
+    try assist.run_all()
     return 0

@@ -1,0 +1,135 @@
+# Editor help's typed view: the snippet checked with the caret's line set aside, for the
+# types of the locals above it. When even that does not check, the last check that did is
+# the answer for names it knew (on the next keystroke the code is usually half-typed again).
+
+## A local's type from a check: its name, its line in the part, and the type's text.
+struct TypedLocal:
+    let name: str
+    let line: u32
+    let type_text: str
+
+## What the last check that passed found, by name; under `check_lock`.
+var last_good: collections.List[TypedLocal]
+var last_good_texts: collections.TextPool
+
+## The module name editor help checks a snippet as, beside `snippet`.
+let assist_module: str = "assist"
+
+## The types of the locals of `part` in the snippet, checked with line `line` of the part
+## replaced by `_ = (...)` of the names in scope there (so that none is pruned as unused);
+## the last good check's when this one fails. Strings live in `texts`.
+func checked_locals(root: str, run_over: RunOver, header: str, body: str, part: Part, line: u32, names: const ScopeName[], texts: collections.TextPool*, out: collections.List[TypedLocal]*) -> !:
+    var replaced = collections.List[u8]()
+    defer replaced.destroy()
+    let text = header if part == .header else body
+    try replace_line(text, line, part == .body, names, &replaced)
+    var wrapped = try wrap(run_over, (str)replaced.view() if part == .header else header, (str)replaced.view() if part == .body else body)
+    defer wrapped.destroy()
+    check_lock.lock()
+    defer check_lock.unlock()
+    try write_text(root, "assist.lucb", wrapped.text())
+    if library == none:
+        library = try embed.Library.create()
+    var kept = library else return
+    var result = try kept.check(root, assist_module)
+    defer result.close()
+    if result.ok():
+        if let tree = result.tree:
+            var found = TypeWalk(table = &result.checker.table, wrapped = &wrapped, part = part, texts = texts, out = out)
+            try found.walk(tree.body)
+            # Kept for the next keystroke, when the code may not check.
+            last_good.clear()
+            last_good_texts.destroy()
+            last_good_texts = collections.TextPool()
+            for local in out.view():
+                try last_good.append(TypedLocal(name = try last_good_texts.keep_text(local.name.bytes), line = local.line, type_text = try last_good_texts.keep_text(local.type_text.bytes)))
+            return
+    for local in last_good.view():
+        try out.append(TypedLocal(name = try texts.keep_text(local.name.bytes), line = 0, type_text = try texts.keep_text(local.type_text.bytes)))
+
+## `text` with line `line` holding `_ = (0, a, b)` of `names` at its indentation; nothing
+## at the header's left edge, where only declarations go (`body`: every line is in the
+## entry function).
+func replace_line(text: str, line: u32, body: bool, names: const ScopeName[], out: collections.List[u8]*) -> !:
+    var current: u32 = 1
+    var at: usize = 0
+    while at <= text.length:
+        var end = at
+        while end < text.length and text.bytes[end] != '\n': end += 1
+        let content = (str)text.bytes[at..<end]
+        if current == line:
+            let indent = indentation(content)
+            if indent > 0 or body:
+                for _ in 0..<indent: try out.append(' ')
+                try append_text(out, "_ = (0")
+                for local in names:
+                    try append_text(out, ", ")
+                    try append_text(out, local.name)
+                try append_text(out, ")")
+        else:
+            try append_text(out, content)
+        if end < text.length: try out.append('\n')
+        at = end + 1
+        current += 1
+
+func append_text(out: collections.List[u8]*, text: str) -> !:
+    for byte in text.bytes: try out.append(byte)
+
+## A walk of the checked tree for the declarations of one part and their types.
+struct TypeWalk:
+    let table: const types.Table*
+    let wrapped: const Wrapped*
+    let part: Part
+    var texts: collections.TextPool*
+    var out: collections.List[TypedLocal]*
+
+    ## Every `let`, `var`, loop variable and parameter in the list starting at `first`
+    ## and below it.
+    func walk(first: ast.Node*?) -> !:
+        var cursor = first
+        while let node = cursor:
+            if (node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_ or node.kind == ast.Kind.param) and node.text.length > 0 and node.type_id > types.never_id:
+                let (part, line, column) = self.wrapped.locate(node.line, 1)
+                _ = column
+                if part == self.part:
+                    var spelled = collections.List[u8]()
+                    defer spelled.destroy()
+                    try type_text(self.table, node.type_id, &spelled, 0)
+                    if spelled.length() > 0:
+                        try self.out.append(TypedLocal(name = try self.texts.keep_text(node.text.bytes), line = line, type_text = try self.texts.keep_text(spelled.view())))
+            try self.walk(node.left)
+            try self.walk(node.right)
+            try self.walk(node.body)
+            cursor = node.next
+
+## Type `id` as a snippet writes it: `f32[4]`, `Geometry` (pointers and `const` dropped:
+## members are reached the same way), "" for what has no name here.
+func type_text(table: const types.Table*, id: u32, out: collections.List[u8]*, depth: u32) -> !:
+    if depth > 8: return
+    let t = table.get(id)
+    match t.kind:
+        .pointer, .optional:
+            try type_text(table, t.elem, out, depth + 1)
+        .array:
+            try type_text(table, t.elem, out, depth + 1)
+            var room: u8[24]
+            try append_text(out, try strings.format(room, f"[{t.length}]"))
+        .span:
+            try type_text(table, t.elem, out, depth + 1)
+            try append_text(out, "[]")
+        .bool_: try append_text(out, "bool")
+        .i8_: try append_text(out, "i8")
+        .i16_: try append_text(out, "i16")
+        .i32_: try append_text(out, "i32")
+        .i64_, .untyped_int: try append_text(out, "i64")
+        .isize_: try append_text(out, "isize")
+        .u8_: try append_text(out, "u8")
+        .u16_: try append_text(out, "u16")
+        .u32_: try append_text(out, "u32")
+        .u64_: try append_text(out, "u64")
+        .usize_: try append_text(out, "usize")
+        .f16_: try append_text(out, "f16")
+        .f32_: try append_text(out, "f32")
+        .f64_, .untyped_float: try append_text(out, "f64")
+        .str_: try append_text(out, "str")
+        _: try append_text(out, t.name)

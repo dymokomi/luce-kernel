@@ -1,0 +1,210 @@
+# Editor help's view of what a snippet can name: the lib's functions and types, luce-std's
+# `math` and `math32`, and the host's stub structs, read from their source text with their
+# `##` docs, so every doc lives once, next to its declaration.
+
+## What a completion item or hovered word is.
+pub enum ItemKind:
+    function
+    method
+    field
+    type_
+    keyword
+    local
+
+## The kind's name, as an editor shows it.
+pub func kind_name(kind: ItemKind) -> str:
+    return match kind:
+        .function => "function"
+        .method => "method"
+        .field => "field"
+        .type_ => "type"
+        .keyword => "keyword"
+        _ => "local"
+
+## One declaration. `owner` is "" for a free function or a type, else the struct or module
+## (`math32`) it belongs to; `detail` the signature (`snoise(p: f32[4]) -> f32`) or a
+## field's `name: type`; `result` a function's result or a field's type as written ("" for
+## none); `on_type` whether it is called on the type (a static function).
+struct Decl:
+    let owner: str
+    let name: str
+    let kind: ItemKind
+    let detail: str
+    let result: str
+    let doc: str
+    let on_type: bool
+
+## Every declaration of the sources, and the docs joined from their `##` lines.
+struct Index:
+    var decls: collections.List[Decl]
+    var texts: collections.TextPool
+
+    func destroy():
+        self.decls.destroy()
+        self.texts.destroy()
+
+    ## The lib, luce-std's math modules and the host's stub texts (each a module of
+    ## structs, as luce-geocore's `code`).
+    static func of(host_texts: const str[]) -> Index!:
+        var index = Index()
+        errdefer index.destroy()
+        for (at, path) in source_paths.indexed():
+            if strings.starts_with(path, "luce_kernel/lib/"):
+                try index.read(source_texts[at], "", true, false)
+            elif path == "luce_std/math.lucb":
+                try index.read(source_texts[at], "math", false, false)
+            elif path == "luce_std/math32.lucb":
+                try index.read(source_texts[at], "math32", false, false)
+        for text in host_texts:
+            try index.read(text, "", false, false)
+        return index
+
+    ## The declaration `name` of `owner`, if there is one.
+    func find(owner: str, name: str) -> Decl?:
+        for decl in self.decls.view():
+            if decl.owner == owner and decl.name == name: return decl
+        return none
+
+    ## Whether `name` is a type the index knows.
+    func is_type(name: str) -> bool:
+        if let decl = self.find("", name):
+            return decl.kind == .type_
+        return false
+
+    ## Read the public declarations of one source. Top-level ones belong to `module`;
+    ## `lib` keeps only the names a snippet gets without an import. A member without a
+    ## `##` doc shares the doc of the member before it (`ptnum`, `numpt`), until a blank
+    ## line or another line at its level. `private_too` reads a header's own helpers,
+    ## which need no `pub`.
+    func read(text: str, module: str, lib: bool, private_too: bool) -> !:
+        var doc = collections.List[u8]()
+        defer doc.destroy()
+        var shared: str = ""
+        var owner: str? = none
+        var lines = Lines(text = text)
+        while let line = lines.next():
+            let trimmed = strings.trim(line)
+            let indent = indentation(line)
+            if trimmed.length == 0:
+                doc.clear()
+                shared = ""
+                continue
+            if strings.starts_with(trimmed, "##"):
+                if doc.length() > 0: try doc.append(' ')
+                let words = strings.trim((str)trimmed.bytes[2..])
+                for byte in words.bytes: try doc.append(byte)
+                continue
+            if trimmed.bytes[0] == '#': continue
+            if indent == 0:
+                owner = none
+                shared = ""
+            elif indent > 4:
+                continue
+            var doc_text = shared
+            if doc.length() > 0: doc_text = try self.texts.keep_text(doc.view())
+            doc.clear()
+            if indent == 0:
+                if let name = declaration(trimmed, "struct ", private_too):
+                    let struct_name = leading_name(name)
+                    if not lib or is_lib_name(struct_name):
+                        try self.decls.append(Decl(owner = "", name = struct_name, kind = .type_, detail = (str)trimmed.bytes[(4 if strings.starts_with(trimmed, "pub ") else 0)..<trimmed.length - 1], result = struct_name, doc = doc_text, on_type = false))
+                        owner = struct_name
+                    continue
+                if let signature = declaration(trimmed, "func ", private_too):
+                    let name = leading_name(signature)
+                    if lib and not is_lib_name(name): continue
+                    try self.add_function(module, signature, doc_text, .function, false)
+                    continue
+                if let field = declaration(trimmed, "let ", private_too):
+                    try self.add_field(module, field, doc_text)
+                continue
+            # A member of a public struct.
+            let struct_name = owner else continue
+            shared = ""
+            if let signature = declaration(trimmed, "static func ", private_too):
+                try self.add_function(struct_name, signature, doc_text, .method, true)
+            elif let signature = declaration(trimmed, "func ", private_too):
+                try self.add_function(struct_name, signature, doc_text, .method, false)
+            elif let field = declaration(trimmed, "var ", private_too):
+                try self.add_field(struct_name, field, doc_text)
+            elif let field = declaration(trimmed, "let ", private_too):
+                try self.add_field(struct_name, field, doc_text)
+            else:
+                continue
+            shared = doc_text
+
+    ## `signature` is the text after `func `, ending in `:`.
+    func add_function(owner: str, signature: str, doc: str, kind: ItemKind, on_type: bool) -> !:
+        let detail = (str)signature.bytes[..<signature.length - 1] if strings.ends_with(signature, ":") else signature
+        var result: str = ""
+        if let arrow = strings.find_last(detail, ") -> "):
+            result = (str)detail.bytes[arrow + 5..]
+        try self.decls.append(Decl(owner = owner, name = leading_name(detail), kind = kind, detail = detail, result = result, doc = doc, on_type = on_type))
+
+    ## `field` is the text after `let ` or `var `: `name: type`, perhaps `= value`.
+    func add_field(owner: str, field: str, doc: str) -> !:
+        var detail = field
+        if let equals = strings.find(field, " = "):
+            detail = (str)field.bytes[..<equals]
+        var result: str = ""
+        if let colon = strings.find(detail, ": "):
+            result = (str)detail.bytes[colon + 2..]
+        try self.decls.append(Decl(owner = owner, name = leading_name(detail), kind = .field, detail = detail, result = result, doc = doc, on_type = false))
+
+## The lines of a text, without their newlines.
+struct Lines:
+    let text: str
+    var at: usize = 0
+
+    func next() -> str?:
+        if self.at > self.text.length: return none
+        let start = self.at
+        var end = start
+        while end < self.text.length and self.text.bytes[end] != '\n': end += 1
+        self.at = end + 1
+        return (str)self.text.bytes[start..<end]
+
+## The text after `pub word` (or plain `word` when `private_too`) starting `text`.
+func declaration(text: str, word: str, private_too: bool) -> str?:
+    if strings.starts_with(text, "pub "):
+        return after_word((str)text.bytes[4..], word)
+    if private_too: return after_word(text, word)
+    return none
+
+## The text after `word` when `text` starts with it.
+func after_word(text: str, word: str) -> str?:
+    if not strings.starts_with(text, word): return none
+    return (str)text.bytes[word.length..]
+
+## The name at the start of `text` (letters, digits, `_`).
+func leading_name(text: str) -> str:
+    var end: usize = 0
+    while end < text.length and word_byte(text.bytes[end]): end += 1
+    return (str)text.bytes[..<end]
+
+## How many spaces a line starts with.
+func indentation(line: str) -> usize:
+    var count: usize = 0
+    while count < line.length and line.bytes[count] == ' ': count += 1
+    return count
+
+func is_lib_name(name: str) -> bool:
+    for known in lib_names:
+        if known == name: return true
+    return false
+
+## A type as written, reduced to the struct or scalar it names: `const Geometry*` is
+## `Geometry`, `Hit?` is `Hit`.
+func base_type(written: str) -> str:
+    var text = strings.trim(written)
+    if strings.starts_with(text, "const "): text = (str)text.bytes[6..]
+    var end = text.length
+    while end > 0 and (text.bytes[end - 1] == '*' or text.bytes[end - 1] == '?' or text.bytes[end - 1] == '!' or text.bytes[end - 1] == ' '): end -= 1
+    return (str)text.bytes[..<end]
+
+## The element type of an array or span type (`f32[4]` is `f32`), or the type itself.
+func item_type(written: str) -> str:
+    let text = base_type(written)
+    if not strings.ends_with(text, "]"): return text
+    let open = strings.last(text, '[') else return text
+    return (str)text.bytes[..<open]

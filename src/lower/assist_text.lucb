@@ -1,0 +1,255 @@
+# Editor help's reading of the text around the caret, without a check: the word there,
+# the chain of members before a dot, and the locals declared above, so half-typed code
+# still gets help.
+
+## A place in one part's text: the byte offset, the 1-based line, where that line starts
+## and how far it is indented.
+struct Place:
+    let text: str
+    let offset: usize
+    let line: u32
+    let line_start: usize
+    let indent: usize
+
+    ## Line `line`, column `column` (1-based, in bytes; past the line's end is its end).
+    static func of(text: str, line: u32, column: u32) -> Place?:
+        let (start, end) = line_bounds(text, line) else return none
+        var offset = start + (usize)(column - 1 if column > 0 else 0)
+        if offset > end: offset = end
+        return Place(text = text, offset = offset, line = line, line_start = start, indent = indentation((str)text.bytes[start..<end]))
+
+    ## Whether the place is in a comment or a string literal of its line.
+    func in_comment_or_text() -> bool:
+        var quoted = false
+        for at in self.line_start..<self.offset:
+            let byte = self.text.bytes[at]
+            if byte == '"': quoted = not quoted
+            elif byte == '#' and not quoted: return true
+        return quoted
+
+## Where line `line` (1-based) of `text` starts and ends (before its newline).
+func line_bounds(text: str, line: u32) -> (usize, usize)?:
+    if line == 0: return none
+    var start: usize = 0
+    var current: u32 = 1
+    while current < line:
+        let newline = strings.find_from(text, "\n", start) else return none
+        start = newline + 1
+        current += 1
+    var end = start
+    while end < text.length and text.bytes[end] != '\n': end += 1
+    return (start, end)
+
+## The text of line `line`, or "".
+func line_text(text: str, line: u32) -> str:
+    let (start, end) = line_bounds(text, line) else return ""
+    return (str)text.bytes[start..<end]
+
+## Where the word ending at `offset` starts.
+func word_start(text: str, offset: usize) -> usize:
+    var at = offset
+    while at > 0 and word_byte(text.bytes[at - 1]): at -= 1
+    return at
+
+## Where the word going on at `offset` ends.
+func word_end(text: str, offset: usize) -> usize:
+    var at = offset
+    while at < text.length and word_byte(text.bytes[at]): at += 1
+    return at
+
+## One link of a member chain: `input(0)[1]` is `input`, called, indexed once.
+struct Segment:
+    let name: str
+    let called: bool
+    let indexes: u32
+
+## The chain of names ending just before `dot` (`k.input(0).pcopen(p.P, 1.0, 8)` before
+## its last `.`), first link first; false when what is there is no chain.
+func chain_before(text: str, dot: usize, out: collections.List[Segment]*) -> bool!:
+    var at = dot
+    while true:
+        var indexes: u32 = 0
+        var called = false
+        while at > 0 and text.bytes[at - 1] == ']':
+            at = opening(text, at - 1, '[', ']') else return false
+            indexes += 1
+        if at > 0 and text.bytes[at - 1] == ')':
+            at = opening(text, at - 1, '(', ')') else return false
+            called = true
+        let start = word_start(text, at)
+        if start == at or not name_byte(text.bytes[start]): return false
+        try out.insert(0, Segment(name = (str)text.bytes[start..<at], called = called, indexes = indexes))
+        at = start
+        if at == 0 or text.bytes[at - 1] != '.': return true
+        at -= 1
+    return true
+
+## The chain an expression starts with (`k.input(0).bounds()` of `k.input(0).bounds().min * 2`);
+## false when it starts with something else.
+func chain_after(text: str, out: collections.List[Segment]*) -> bool!:
+    var at: usize = 0
+    while at < text.length and text.bytes[at] == ' ': at += 1
+    while true:
+        let end = word_end(text, at)
+        if end == at or not name_byte(text.bytes[at]): return out.length() > 0
+        let name = (str)text.bytes[at..<end]
+        at = end
+        var called = false
+        var indexes: u32 = 0
+        if at < text.length and text.bytes[at] == '(':
+            at = closing(text, at, '(', ')') else return false
+            called = true
+        while at < text.length and text.bytes[at] == '[':
+            at = closing(text, at, '[', ']') else return false
+            indexes += 1
+        try out.append(Segment(name = name, called = called, indexes = indexes))
+        if at >= text.length or text.bytes[at] != '.': return true
+        at += 1
+    return true
+
+## The offset of the `open` matching the `close` at `at`, scanning back.
+func opening(text: str, at: usize, open: u8, close: u8) -> usize?:
+    var depth: usize = 0
+    var cursor = at + 1
+    while cursor > 0:
+        cursor -= 1
+        let byte = text.bytes[cursor]
+        if byte == close: depth += 1
+        elif byte == open:
+            depth -= 1
+            if depth == 0: return cursor
+    return none
+
+## The offset just past the `close` matching the `open` at `at`.
+func closing(text: str, at: usize, open: u8, close: u8) -> usize?:
+    var depth: usize = 0
+    for cursor in at..<text.length:
+        let byte = text.bytes[cursor]
+        if byte == open: depth += 1
+        elif byte == close:
+            depth -= 1
+            if depth == 0: return cursor + 1
+    return none
+
+func name_byte(byte: u8) -> bool:
+    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_'
+
+## A local declared above the caret: its name and line, how its line is indented, whether
+## it lives only in the block its line opens (a loop's variable, an `if let`, a function's
+## parameter), and its type as written or its value's text ("" when not given).
+struct ScopeName:
+    let name: str
+    let line: u32
+    let indent: usize
+    let block_only: bool
+    let written: str
+    let value: str
+
+## The locals of `text` declared above `place`'s line and still in scope there. In the
+## header only the function the caret is in counts, its parameters among them. `through`
+## counts the caret's own line too.
+func lexical_locals(place: const Place*, header: bool, through: bool, out: collections.List[ScopeName]*) -> !:
+    var first: u32 = 1
+    if header:
+        if place.indent == 0: return
+        # The function the caret is in: the nearest line above at the left edge.
+        var line = place.line
+        while line > 1:
+            line -= 1
+            let text = line_text(place.text, line)
+            if strings.trim(text).length > 0 and indentation(text) == 0:
+                try function_parameters(text, line, out)
+                first = line + 1
+                break
+    for line in first..<place.line + (1 if through else 0):
+        let text = line_text(place.text, line)
+        let trimmed = strings.trim(text)
+        let indent = indentation(text)
+        for (word, block_only) in [("let ", false), ("var ", false), ("for ", true), ("if let ", true), ("elif let ", true), ("while let ", true)]:
+            let rest = after_word(trimmed, word) else continue
+            try add_declared(rest, line, indent, block_only, word == "for ", out)
+            break
+    # Those whose block closed above the caret go.
+    var at: usize = 0
+    while at < out.length():
+        let local = out.at(at)
+        if visible(place, local.line, local.indent, local.block_only): at += 1
+        else: out.remove(at)
+
+## The names `rest` declares (the text after `let`, `for` and the like).
+func add_declared(rest: str, line: u32, indent: usize, block_only: bool, loop: bool, out: collections.List[ScopeName]*) -> !:
+    if rest.length > 0 and rest.bytes[0] == '(':
+        # A tuple pattern: names alone.
+        let close = strings.find(rest, ")") else return
+        var pieces = Pieces(text = (str)rest.bytes[1..<close])
+        while let piece = pieces.next():
+            let name = leading_name(strings.trim(piece))
+            if name.length > 0: try out.append(ScopeName(name = name, line = line, indent = indent, block_only = block_only, written = "", value = ""))
+        return
+    let name = leading_name(rest)
+    if name.length == 0: return
+    let after = strings.trim((str)rest.bytes[name.length..])
+    var written: str = ""
+    var value: str = ""
+    if loop:
+        # `for i in 0..<n` counts; other loops' items have their sequence's element type.
+        if let range = after_word(after, "in "):
+            if strings.contains(range, ".."): written = "i64"
+    elif strings.starts_with(after, ":"):
+        let typed = strings.trim((str)after.bytes[1..])
+        if let equals = strings.find(typed, "="):
+            written = strings.trim((str)typed.bytes[..<equals])
+            value = strings.trim((str)typed.bytes[equals + 1..])
+        else:
+            written = typed
+    elif strings.starts_with(after, "="):
+        value = strings.trim((str)after.bytes[1..])
+    try out.append(ScopeName(name = name, line = line, indent = indent, block_only = block_only, written = written, value = value))
+
+## A header function's parameters, from its `func name(a: T, b: U) -> R:` line.
+func function_parameters(text: str, line: u32, out: collections.List[ScopeName]*) -> !:
+    let open = strings.find(text, "(") else return
+    let close = strings.find_last(text, ")") else return
+    if close <= open or not strings.contains((str)text.bytes[..<open], "func "): return
+    var pieces = Pieces(text = (str)text.bytes[open + 1..<close])
+    while let piece = pieces.next():
+        let parameter = strings.trim(piece)
+        let colon = strings.find(parameter, ":") else continue
+        var written = strings.trim((str)parameter.bytes[colon + 1..])
+        if let equals = strings.find(written, "="): written = strings.trim((str)written.bytes[..<equals])
+        try out.append(ScopeName(name = leading_name(parameter), line = line, indent = 0, block_only = true, written = written, value = ""))
+
+## Whether a name declared on `line`, indented `indent`, is in scope at `place`: no line
+## between is indented less (or, for a block's own names, as little).
+func visible(place: const Place*, line: u32, indent: usize, block_only: bool) -> bool:
+    if block_only and place.indent <= indent: return false
+    if not block_only and place.indent < indent: return false
+    for between in line + 1..<place.line:
+        let text = line_text(place.text, between)
+        let trimmed = strings.trim(text)
+        if trimmed.length == 0 or trimmed.bytes[0] == '#': continue
+        let level = indentation(text)
+        if level < indent or (block_only and level == indent): return false
+    return true
+
+## The comma-separated pieces of a list, commas inside brackets kept.
+struct Pieces:
+    let text: str
+    var at: usize = 0
+    var done: bool = false
+
+    func next() -> str?:
+        if self.done: return none
+        var depth: usize = 0
+        let start = self.at
+        while self.at < self.text.length:
+            let byte = self.text.bytes[self.at]
+            if byte == '(' or byte == '[': depth += 1
+            elif (byte == ')' or byte == ']') and depth > 0: depth -= 1
+            elif byte == ',' and depth == 0:
+                let piece = (str)self.text.bytes[start..<self.at]
+                self.at += 1
+                return piece
+            self.at += 1
+        self.done = true
+        return (str)self.text.bytes[start..<self.at]

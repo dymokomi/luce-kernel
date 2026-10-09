@@ -1,0 +1,63 @@
+## Editor help: completions after a dot and in the open, on half-typed code, and hover text.
+import strings
+from luce_std import collections
+from luce_kernel import lower
+from luce_kernel.lower import Part, ItemKind
+import lowering
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("editor help checks")
+
+pub func run_all() -> !:
+    var room: u8[512]
+    let root = try lowering.make_root(room)
+    # Members of the element after `p.`, with signatures and the stubs' docs.
+    try expect_items(root, "", "p.", 1, 3, ["P", "N", "Cd", "ptnum", "f32", "set_f32"], "p. lists the point's members")
+    try expect_items(root, "", "k.", 1, 3, ["time", "input", "f32", "i32"], "k. lists the kernel's members")
+    try expect_items(root, "", "let near = k.input(0)\nlet h = near.probe(p.P)\nh.", 3, 3, ["prim", "uv", "distance"], "a chain through locals")
+    try expect_items(root, "", "let m = Mat3.rotation(1.0, p.N)\nm.", 2, 3, ["x", "transform"], "a lib struct's methods")
+    try expect_items(root, "", "Mat3.", 1, 6, ["identity", "rotation"], "a type's static functions")
+    try expect_items(root, "", "p.P = math32.s", 1, 15, ["sin", "sqrt"], "a math module's functions")
+    try expect_items(root, "", "let a = sno", 1, 12, ["snoise", "snoise4"], "lib functions by prefix")
+    try expect_items(root, "func helper(x: f32) -> f32:\n    return x\n", "let amount = 1.0\np.P[1] = am", 2, 12, ["amount"], "locals in scope")
+    try expect_items(root, "func helper(x: f32) -> f32:\n    return x\n", "hel", 1, 4, ["helper"], "the header's helpers")
+    # Only the check knows this one's type (the text starts with a parenthesis).
+    try expect_items(root, "", "let h = (k.input(0)).probe(p.P)\nh.", 2, 3, ["prim", "distance"], "a local typed by the check")
+    # The next keystroke breaks the check: the last good one still types `h`.
+    try expect_items(root, "", "let h = (k.input(0)).probe(p.P)\nlet x = (\nh.", 3, 3, ["prim", "distance"], "the last good check")
+    # Half-typed: the line above does not check, the dot still completes.
+    try expect_items(root, "", "let g = k.input(0)\nlet x = g.value(1, \nlet c = g.", 3, 11, ["count", "value", "probe"], "a half-typed line")
+    var completion = try lower.complete(root, lowering.run_over_points, "", "p.P = snoise(p.P) + ", .body, 1, 21, lowering.stubs_list())
+    defer completion.destroy()
+    var keyword = false
+    for item in completion.items():
+        if item.label == "let" and item.kind == .keyword: keyword = true
+        if item.label == "snoise": expect(item.detail == "snoise(p: f32[4]) -> f32" and item.doc == "Signed 3D noise of lanes 0 to 2.", "snoise's signature and doc")
+    expect(keyword and completion.items().length > 100, "the open completes locals, lib and keywords")
+    # Hover: a lib function, a member, a local.
+    try expect_hover(root, "p.P[1] = snoise(p.P)\n", 1, 12, "snoise(p: f32[4]) -> f32\nSigned 3D noise of lanes 0 to 2.", "hovering snoise")
+    try expect_hover(root, "let h = k.input(0).probe(p.P)\n", 1, 21, "probe(at: f32[4]) -> Hit", "hovering a member")
+    try expect_hover(root, "let h = k.input(0).probe(p.P)\nlet d = h.distance\n", 2, 6, "d: f32", "hovering a local")
+    try expect_hover(root, "p.P = p.P # snoise\n", 1, 14, "", "nothing in a comment")
+    print("ok    editor help: members, chains, lib, locals, half-typed lines, hover")
+
+func expect_items(root: str, header: str, body: str, line: u32, column: u32, wanted: const str[], what: str) -> !:
+    var completion = try lower.complete(root, lowering.run_over_points, header, body, .body, line, column, lowering.stubs_list())
+    defer completion.destroy()
+    for name in wanted:
+        var found = false
+        for item in completion.items():
+            if item.label == name: found = true
+        if not found:
+            for item in completion.items(): print(f"  {item.label}")
+            print(f"  missing {name}")
+        expect(found, what)
+
+func expect_hover(root: str, body: str, line: u32, column: u32, wanted: str, what: str) -> !:
+    var out = collections.List[u8]()
+    defer out.destroy()
+    try lower.hover(root, lowering.run_over_points, "", body, .body, line, column, lowering.stubs_list(), &out)
+    if (str)out.view() != wanted: print(f"  got [{(str)out.view()}]")
+    expect((str)out.view() == wanted, what)

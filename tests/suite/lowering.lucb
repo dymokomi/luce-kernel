@@ -10,9 +10,15 @@ from luce_kernel.lower import Host, RunOver, Compiled
 import common
 
 ## The test host's API stubs, as luce-geocore's `code` module will look.
-let stubs: str = "## Test API.\npub struct Point:\n    pub var P: f32[4]\n    pub var N: f32[4]\n    pub var Cd: f32[4]\n    pub let ptnum: i32\n    pub let numpt: i32\n\n    pub func f32(name: str) -> f32:\n        _ = name\n        return 0.0\n\n    pub func set_f32(name: str, value: f32):\n        _ = name\n        _ = value\n\n    pub func vec3(name: str) -> f32[4]:\n        _ = name\n        return f32[4](0.0)\n\n    pub func area() -> f32:\n        return 0.0\n\npub struct Hit:\n    pub let prim: i32\n    pub let uv: f32[2]\n    pub let position: f32[4]\n    pub let distance: f32\n\npub struct Source:\n    var unused: i32\n\n    pub func count() -> i32:\n        return 0\n\n    pub func value(i: i32, name: str) -> f32:\n        _ = i\n        _ = name\n        return 0.0\n\n    pub func probe(at: f32[4]) -> Hit:\n        _ = at\n        return Hit(prim = 0, uv = [0.0, 0.0], position = [0.0, 0.0, 0.0, 0.0], distance = 0.0)\n\npub struct Kernel:\n    pub let time: f64\n\n    pub func input(index: i64) -> const Source*:\n        _ = index\n        return (const Source*)(void*)0x1000\n\n    pub func f32(name: str, default: f32 = 0.0) -> f32:\n        _ = name\n        return default\n\n    pub func i32(name: str, default: i32 = 0) -> i32:\n        _ = name\n        return default\n"
+pub let stubs: str = "## Test API.\npub struct Point:\n    pub var P: f32[4]\n    pub var N: f32[4]\n    pub var Cd: f32[4]\n    pub let ptnum: i32\n    pub let numpt: i32\n\n    pub func f32(name: str) -> f32:\n        _ = name\n        return 0.0\n\n    pub func set_f32(name: str, value: f32):\n        _ = name\n        _ = value\n\n    pub func vec3(name: str) -> f32[4]:\n        _ = name\n        return f32[4](0.0)\n\n    pub func area() -> f32:\n        return 0.0\n\npub struct Hit:\n    pub let prim: i32\n    pub let uv: f32[2]\n    pub let position: f32[4]\n    pub let distance: f32\n\npub struct Source:\n    var unused: i32\n\n    pub func count() -> i32:\n        return 0\n\n    pub func value(i: i32, name: str) -> f32:\n        _ = i\n        _ = name\n        return 0.0\n\n    pub func probe(at: f32[4]) -> Hit:\n        _ = at\n        return Hit(prim = 0, uv = [0.0, 0.0], position = [0.0, 0.0, 0.0, 0.0], distance = 0.0)\n\npub struct Kernel:\n    pub let time: f64\n\n    pub func input(index: i64) -> const Source*:\n        _ = index\n        return (const Source*)(void*)0x1000\n\n    pub func f32(name: str, default: f32 = 0.0) -> f32:\n        _ = name\n        return default\n\n    pub func i32(name: str, default: i32 = 0) -> i32:\n        _ = name\n        return default\n"
 
 pub let points: usize = 64
+
+## The stubs as the host texts editor help reads.
+pub func stubs_list() -> const str[]:
+    return stub_texts[..<1]
+
+let stub_texts: str[1] = [stubs]
 
 pub let run_over_points: RunOver = RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = "from host.code import Point, Kernel")
 

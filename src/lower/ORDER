@@ -10,3 +10,7 @@ scan.lucb
 statements.lucb
 expressions.lucb
 calls.lucb
+assist_index.lucb
+assist_text.lucb
+assist_check.lucb
+assist.lucb
