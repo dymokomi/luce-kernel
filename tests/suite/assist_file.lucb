@@ -1,0 +1,104 @@
+## Editor help for a file of a package (a Script node's script): a check package with a
+## dependency of its own, checked by `embed.Library.check_file`; completions after a dot
+## and in the open, hover on an imported package's function, a diagnostic at its line.
+import strings
+import time
+from io import path
+from luce_std import collections
+from luce_kernel import lower
+from luce_kernel.lower import Part, ItemKind
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("file help checks")
+
+let dependency_manifest: str = "#prisma 4.0\ndef package \"help-dep\" {\n    str owner = \"luced\"\n    str version = \"0.1.0\"\n    str kind = \"package\"\n    str language = \"luce-base\"\n    str description = \"A dependency of the file help checks.\"\n    str[] public = [\"tools\"]\n}\n"
+
+let tools_text: str = "## Brushes and helpers.\n\n## A brush for painting.\npub struct Brush:\n    ## How wide it paints.\n    pub var width: f32\n    var secret: i32\n\n    ## A brush `width` wide.\n    pub static func make(width: f32) -> Brush:\n        return Brush(width = width, secret = 0)\n\n    ## The area it covers in one dab.\n    pub func area() -> f32:\n        return self.width * self.width\n\n## Twice `x`.\npub func double(x: f32) -> f32:\n    return x * 2.0\n"
+
+let check_manifest: str = "#prisma 4.0\ndef package \"help-check\" {\n    str owner = \"luced\"\n    str version = \"0.1.0\"\n    str kind = \"tool\"\n    str language = \"luce-base\"\n    str description = \"The file help checks' check package.\"\n    str entry = \"src/script.lucb\"\n    def dependency \"help-dep\" {\n        str owner = \"luced\"\n        str path = \"../dep\"\n    }\n}\n"
+
+## The script, lines 1 to 8.
+let script: str = "from help_dep.tools import Brush\nfrom help_dep import tools\n\npub func run(scale: f32) -> f32:\n    let b = Brush.make(scale)\n    let d = tools.double(b.width)\n    return d + b.area()\n"
+
+pub func run_all() -> !:
+    var room: u8[512]
+    let base = try strings.format(room, f"{path.temp()}/luce-kernel-file-help")
+    try lower.write_text(base, "dep/package.prisma", dependency_manifest)
+    try lower.write_text(base, "dep/src/tools.lucb", tools_text)
+    try lower.write_text(base, "check/package.prisma", check_manifest)
+    try lower.write_text(base, "check/src/script.lucb", script)
+    var file_room: u8[600]
+    let file = try strings.format(file_room, f"{base}/check/src/script.lucb")
+    # A clean check, timed: the first loads the dependency, later ones reuse it.
+    let first_start = time.now()
+    var clean = try lower.check_file(file, script)
+    let first = time.now() - first_start
+    for d in clean.diagnostics(): print(f"  {d.line}:{d.column}: {d.message}")
+    expect(clean.ok(), "the script checks clean")
+    clean.destroy()
+    let again_start = time.now()
+    var again = try lower.check_file(file, script)
+    let later = time.now() - again_start
+    again.destroy()
+    print(f"ok    file check: first {(f64)first / 1e6} ms, later {(f64)later / 1e6} ms")
+    # An error underlined at its line.
+    var broken = try lower.check_file(file, "from help_dep.tools import Brush\n\npub func run(scale: f32) -> f32:\n    let b = Brush.make(scale)\n    return b.missing\n")
+    defer broken.destroy()
+    expect(not broken.ok(), "a missing member fails the check")
+    var at_line = false
+    for d in broken.diagnostics():
+        if d.severity == .error and d.part == .body and d.line == 5 and d.column > 4: at_line = true
+    expect(at_line, "the error is at line 5")
+    # Members of a local's type, of a type, of a module; private and static ones apart.
+    try expect_items(file, "    b.", 8, 7, ["width", "area"], ["secret", "make"], "b. lists a Brush's public fields and methods")
+    try expect_items(file, "    Brush.", 8, 11, ["make"], ["area", "width"], "Brush. lists its static functions")
+    try expect_items(file, "    tools.", 8, 11, ["double", "Brush"], ["secret"], "tools. lists the module's declarations")
+    try expect_items(file, "    let w = Brush.make(1.0).", 8, 29, ["width", "area"], ["make"], "a call's result")
+    try expect_items(file, "    let e = b", 8, 14, ["b"], ["area"], "a local in the open")
+    try expect_items(file, "    let e = Br", 8, 15, ["Brush"], ["area"], "an imported type in the open")
+    # Half-typed: the line above does not check; the last check that passed knows `b`.
+    try expect_items(file, "    let x = (\n    b.", 9, 7, ["width", "area"], ["make"], "the last good check")
+    var completion = try complete(file, "    b.", 8, 7)
+    defer completion.destroy()
+    for item in completion.items():
+        if item.label == "area": expect(item.kind == .method and item.detail == "area() -> f32" and item.doc == "The area it covers in one dab.", "area's signature and doc")
+        if item.label == "width": expect(item.kind == .field and item.detail == "width: f32" and item.doc == "How wide it paints.", "width's type and doc")
+    # Hover: an imported package's function, a local, an imported type.
+    try expect_hover(file, script, 6, 20, "double(x: f32) -> f32\nTwice `x`.", "hovering an imported function")
+    try expect_hover(file, script, 7, 12, "d: f32", "hovering a local")
+    try expect_hover(file, script, 5, 9, "b: Brush", "hovering a local's declaration")
+    try expect_hover(file, script, 1, 30, "struct Brush\nA brush for painting.", "hovering an imported type")
+    print("ok    file help: members of locals, types and modules, the open, hover, a diagnostic")
+
+## The script with `extra` after its last line, completed at `line`, `column`.
+func complete(file: str, extra: str, line: u32, column: u32) -> lower.Completion!:
+    var text = collections.List[u8]()
+    defer text.destroy()
+    for byte in script.bytes: try text.append(byte)
+    for byte in extra.bytes: try text.append(byte)
+    return try lower.complete_file(file, (str)text.view(), line, column)
+
+func expect_items(file: str, extra: str, line: u32, column: u32, wanted: const str[], unwanted: const str[], what: str) -> !:
+    var completion = try complete(file, extra, line, column)
+    defer completion.destroy()
+    for name in wanted:
+        var found = false
+        for item in completion.items():
+            if item.label == name: found = true
+        if not found:
+            for item in completion.items(): print(f"  {item.label}")
+            print(f"  missing {name}")
+        expect(found, what)
+    for name in unwanted:
+        for item in completion.items():
+            if item.label == name: print(f"  unwanted {name}")
+            expect(item.label != name, what)
+
+func expect_hover(file: str, text: str, line: u32, column: u32, wanted: str, what: str) -> !:
+    var out = collections.List[u8]()
+    defer out.destroy()
+    try lower.hover_file(file, text, line, column, &out)
+    if (str)out.view() != wanted: print(f"  got [{(str)out.view()}]")
+    expect((str)out.view() == wanted, what)

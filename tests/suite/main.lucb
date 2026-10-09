@@ -2,6 +2,7 @@
 ## benchmark snippets against plain Base, the fuzzer, and allocation failures.
 ## `--bench` runs the benchmarks instead (tests/bench/run.py).
 import assist
+import assist_file
 import bench
 import conformance
 import faults
@@ -19,4 +20,5 @@ pub func main(arguments: str[]) -> i32!:
     try lowering.run_all()
     try library.run_all()
     try assist.run_all()
+    try assist_file.run_all()
     return 0

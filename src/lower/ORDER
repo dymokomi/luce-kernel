@@ -13,4 +13,6 @@ calls.lucb
 assist_index.lucb
 assist_text.lucb
 assist_check.lucb
+assist_tree.lucb
+assist_file.lucb
 assist.lucb

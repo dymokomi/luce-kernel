@@ -1,0 +1,257 @@
+# Editor help for a whole file of a package, the way a luced-3d Script node's script is
+# one: the host keeps a check package (a package.prisma naming the script's packages, their
+# dependencies synced) and passes the path of the file in it and the editor's text. The
+# text is checked with `embed.Library.check_file` on the library `compile` keeps, so the
+# packages it imports are checked once (about 90 ms) and each later check takes about
+# 0.3 ms:
+#   - `check_file` writes the text to the path and says what the checker said about it;
+#   - `complete_file` and `hover_file` check it as `assist.lucb` beside the path (the
+#     caret's line set aside for a completion, as `complete` does for a snippet) and read
+#     the typed tree: locals, imports, every imported package's members and their docs.
+# When a completion's text does not check, the last one that did answers for names it knew.
+
+## What checking a file found. The file's own diagnostics are at their lines (part
+## `.body`); another file's (a package that does not check) come with line 0 (`.wrapper`),
+## its place in the message.
+pub struct FileCheck:
+    var said: collections.List[Diagnostic]
+    var texts: collections.TextPool
+
+    ## Every diagnostic, in the checker's order.
+    pub func diagnostics() -> const Diagnostic[]:
+        return self.said.view()
+
+    ## Whether nothing said is an error.
+    pub func ok() -> bool:
+        for d in self.said.view():
+            if d.severity == .error: return false
+        return true
+
+    ## Give back the diagnostics and their texts.
+    pub func destroy():
+        self.said.destroy()
+        self.texts.destroy()
+
+    func add(severity: Severity, part: Part, line: u32, column: u32, message: str) -> !:
+        try self.said.append(Diagnostic(severity = severity, part = part, line = line, column = column, message = try self.texts.keep_text(message.bytes)))
+
+## The last completion check that passed, kept for the next keystroke (when the text is
+## half-typed again); under `check_lock`.
+var last_file: embed.Checked?
+
+## The words a file's code may start a word with.
+let file_keywords: str[33] = ["let", "var", "if", "elif", "else", "for", "in", "while", "match", "return", "break", "continue", "and", "or", "not", "true", "false", "none", "func", "struct", "enum", "const", "static", "pub", "try", "catch", "defer", "errdefer", "recover", "import", "from", "error", "print"]
+
+## Check `text` as the file at `path` of a package (written there first): the
+## diagnostics of the file and of any package it imports that does not check.
+pub func check_file(path: str, text: str) -> FileCheck!:
+    var found = FileCheck()
+    errdefer found.destroy()
+    check_lock.lock()
+    defer check_lock.unlock()
+    try write_file(path, text)
+    var result = try checked(path)
+    defer result.close()
+    for d in result.diagnostics:
+        let severity: Severity = match d.severity:
+            .error => Severity.error
+            .note => Severity.note
+            _ => Severity.warning
+        if d.file == path:
+            try found.add(severity, .body, d.line, d.column, d.message)
+        elif severity == .error:
+            var room: u8[600]
+            let placed = strings.format(room, f"{d.file}:{d.line}:{d.column}: {d.message}") else d.message
+            try found.add(severity, .wrapper, 0, 0, placed)
+    return found
+
+## The completions at line `line`, column `column` (1-based, in bytes) of `text`, the file
+## at `path` of its package: after a dot the members of what the chain before it names (a
+## local's type, an imported type or module, a call's result), else the locals in scope,
+## the imports, the file's own declarations and the keywords.
+pub func complete_file(path: str, text: str, line: u32, column: u32) -> Completion!:
+    var completion = Completion(start = column)
+    errdefer completion.destroy()
+    let place = Place.of(text, line, column) else return completion
+    if place.in_comment_or_text(): return completion
+    let start = word_start(text, place.offset)
+    completion.start = (u32)(start - place.line_start + 1)
+    let prefix = (str)text.bytes[start..<place.offset]
+    if start > 0 and text.bytes[start - 1] != '.' and digit(text.bytes[start - 1]): return completion
+    # The locals in scope, the function's parameters among them (a file is all functions,
+    # as a snippet's header is).
+    var locals = collections.List[ScopeName]()
+    defer locals.destroy()
+    try lexical_locals(&place, true, false, &locals)
+    var replaced = collections.List[u8]()
+    defer replaced.destroy()
+    try replace_line(text, line, false, locals.view(), &replaced)
+    check_lock.lock()
+    defer check_lock.unlock()
+    var room: u8[4096]
+    let assist = try assist_path(path, room)
+    try write_file(assist, (str)replaced.view())
+    var result = try checked(assist)
+    errdefer result.close()
+    let tree = result.tree
+    if start > 0 and text.bytes[start - 1] == '.':
+        try complete_member(&result, text, start - 1, prefix, locals.view(), &completion)
+    else:
+        try complete_open(&result, prefix, locals.view(), &completion)
+    # Kept for the next keystroke when it passed; dropped when not.
+    if result.ok() and tree != none:
+        if let old = last_file:
+            var dropped = old
+            dropped.close()
+        last_file = result
+    else:
+        result.close()
+    return completion
+
+## The members after the dot at `dot`: from this check, else from the last that passed.
+func complete_member(result: embed.Checked*, text: str, dot: usize, prefix: str, locals: const ScopeName[], completion: Completion*) -> !:
+    var chain = collections.List[Segment]()
+    defer chain.destroy()
+    if not try chain_before(text, dot, &chain): return
+    let links = chain.view()
+    # A local names its declaration's line; anything else is a top-level name.
+    var local_line: u32? = none
+    for local in locals:
+        if local.name == links[0].name: local_line = local.line
+    if try members_of(result, links, local_line, prefix, completion): return
+    # The last check that passed knows the names by their last declaration.
+    let last = last_file else return
+    var kept = last
+    _ = try members_of(&kept, links, 0 if local_line != none else none, prefix, completion)
+
+## Add the members of what `links` names in the check `result`; false when it does not say.
+func members_of(result: embed.Checked*, links: const Segment[], local_line: u32?, prefix: str, completion: Completion*) -> bool!:
+    let tree = result.tree else return false
+    let made = try FileHelp.of(&result.checker, tree) else return false
+    var help = made
+    defer help.destroy()
+    let target = help.chain_target(links, local_line) else return false
+    try help.add_members(target, prefix, completion)
+    return true
+
+## What may start a word: the locals in scope with their types, what the file imports,
+## its own declarations, and the keywords.
+func complete_open(result: embed.Checked*, prefix: str, locals: const ScopeName[], completion: Completion*) -> !:
+    var help: FileHelp? = none
+    if let tree = result.tree: help = try FileHelp.of(&result.checker, tree)
+    defer:
+        if let made = help:
+            var held = made
+            held.destroy()
+    for local in locals:
+        if not strings.starts_with(local.name, prefix): continue
+        var typed = collections.List[u8]()
+        defer typed.destroy()
+        if let made = help:
+            let id = made.local_type(local.name, local.line)
+            if id > types.never_id: try type_text(&result.checker.table, id, &typed, 0)
+        if typed.length() == 0: try append_text(&typed, local.written)
+        try completion.add(local.name, .local, (str)typed.view(), "")
+    if let made = help:
+        try add_top_level(&made, prefix, completion)
+    for keyword in file_keywords:
+        if strings.starts_with(keyword, prefix): try completion.add(keyword, .keyword, "", "")
+
+## The file's imported names and its own declarations starting with `prefix`.
+func add_top_level(help: const FileHelp*, prefix: str, completion: Completion*) -> !:
+    var cursor = help.tree.body
+    while let d = cursor:
+        cursor = d.next
+        if d.kind == ast.Kind.import_:
+            let spelled = import_name(d)
+            if strings.starts_with(spelled, prefix): try completion.add(spelled, .type_, "module", d.text)
+            continue
+        if d.kind == ast.Kind.from_import:
+            var imported = d.body
+            while let n = imported:
+                imported = n.next
+                var spelled = n.text
+                if let alias = n.left: spelled = alias.text
+                if not strings.starts_with(spelled, prefix): continue
+                let decl = n.resolved else continue
+                let module = help.module_of(decl) else continue
+                let kind = decl_kind(decl) else continue
+                try help.add_decl(decl, module, .function if kind == .method else kind, completion)
+            continue
+        if d.text.length == 0 or not strings.starts_with(d.text, prefix): continue
+        let kind = decl_kind(d) else continue
+        try help.add_decl(d, help.file, .function if kind == .method else kind, completion)
+
+## What the word at line `line`, column `column` (1-based, in bytes) of `text` is, the
+## file at `path`: a declaration's signature then its doc, a local's `name: type`, an
+## import's module; nothing when the check does not say. Into `out`.
+pub func hover_file(path: str, text: str, line: u32, column: u32, out: collections.List[u8]*) -> !:
+    let place = Place.of(text, line, column) else return
+    if place.in_comment_or_text(): return
+    check_lock.lock()
+    defer check_lock.unlock()
+    var room: u8[4096]
+    let assist = try assist_path(path, room)
+    try write_file(assist, text)
+    var result = try checked(assist)
+    defer result.close()
+    let tree = result.tree else return
+    let made = try FileHelp.of(&result.checker, tree) else return
+    var help = made
+    defer help.destroy()
+    let source = result.checker.modules.get(help.file).src.bytes
+    let node = word_node(tree.body, source, place.offset) else return
+    # A local's own declaration stands for itself.
+    let declared = node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_ or node.kind == ast.Kind.param
+    if node.resolved == none and not declared:
+        # `from luce_std import math`: the name is a module.
+        try append_text(out, "module ")
+        try append_text(out, node.text)
+        return
+    let decl = (node if declared else node.resolved) else return
+    match decl.kind:
+        .let_, .var_, .param:
+            try append_text(out, node.text)
+            var typed = collections.List[u8]()
+            defer typed.destroy()
+            try type_text(&result.checker.table, node.type_id if node.type_id > types.never_id else decl.type_id, &typed, 0)
+            if typed.length() > 0:
+                try append_text(out, ": ")
+                for byte in typed.view(): try out.append(byte)
+        .module:
+            try append_text(out, "module ")
+            try append_text(out, decl.text)
+        _:
+            let module = help.module_of(decl) else return
+            try help.describe(decl, module, out)
+
+## The name, member or declared local whose word holds byte `offset` of `source`, in the
+## list at `first` and below it.
+func word_node(first: ast.Node*?, source: const u8[], offset: usize) -> ast.Node*?:
+    var cursor = first
+    while let node = cursor:
+        if node.text.length > 0 and offset >= node.start:
+            var at = node.start
+            if node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_:
+                # `let name`: the name follows the word (a loop's variable starts at it).
+                if at + 4 <= source.length and ((str)source[at..<at + 4] == "let " or (str)source[at..<at + 4] == "var "): at += 4
+            let named = node.kind == ast.Kind.name or node.kind == ast.Kind.member or node.kind == ast.Kind.param or node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_
+            if named and offset >= at and offset <= at + node.text.length: return node
+        for child in [node.left, node.right, node.body]:
+            if let found = word_node(child, source, offset): return found
+        cursor = node.next
+    return none
+
+## Check the file at `path` on the kept library (made on the first call).
+func checked(path: str) -> embed.Checked!:
+    return try kept_library().check_file(path)
+
+## `assist.lucb` beside `path`, in `room`.
+func assist_path(path: str, room: u8[]) -> str!:
+    var cut = path.length
+    while cut > 0 and path.bytes[cut - 1] != '/' and path.bytes[cut - 1] != '\\': cut -= 1
+    return try strings.format(room, f"{(str)path.bytes[..<cut]}assist.lucb")
+
+## Write `text` to `path` (the checker reads the file's own text at every check).
+func write_file(path: str, text: str) -> !:
+    try files.write_text(path, text)

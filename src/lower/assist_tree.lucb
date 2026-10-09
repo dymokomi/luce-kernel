@@ -1,0 +1,342 @@
+# Editor help over a checked file of a package (a luced-3d Script node's script, checked
+# by luce-base's `embed.Library.check_file`): the types of the file's locals, what a chain
+# before a dot names, the members of a type or module, and each declaration's signature and
+# `##` doc, read from its own module's source. Nothing is read from stub texts as the
+# snippet's help does (assist_index.lucb): every package the file imports is among the
+# checker's modules, typed.
+
+## A local or parameter the check typed: its name, its line in the file and its type.
+struct FileLocal:
+    let name: str
+    let line: u32
+    let type_id: u32
+
+## What a chain before a dot names: values of a type (`g.`, its fields and methods), the
+## type itself (`Geometry.`, its static functions and enum cases), or a module (`math.`,
+## its public declarations).
+struct Target:
+    let decl: ast.Node*?
+    let module: usize
+    let on_type: bool
+
+    ## Whether this is a module rather than a type.
+    func is_module() -> bool:
+        return self.decl == none
+
+## One check's view of the file: the checker, the file's module and its typed locals.
+struct FileHelp:
+    let checker: const check.Checker*
+    let file: usize
+    let tree: ast.Node*
+    var locals: collections.List[FileLocal]
+
+    ## The help of a check whose entry tree is `tree`; none when the checker holds no
+    ## module of that tree.
+    static func of(checker: const check.Checker*, tree: ast.Node*) -> FileHelp?!:
+        let modules = checker.modules.span()
+        var at = modules.length
+        while at > 0:
+            at -= 1
+            if modules[at].tree == tree:
+                var help = FileHelp(checker = checker, file = at, tree = tree, locals = collections.List[FileLocal]())
+                errdefer help.destroy()
+                try help.walk(tree.body)
+                return help
+        return none
+
+    func destroy():
+        self.locals.destroy()
+
+    ## Every `let`, `var`, loop variable and parameter with a type, in the list starting at
+    ## `first` and below it.
+    func walk(first: ast.Node*?) -> !:
+        var cursor = first
+        while let node = cursor:
+            if (node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_ or node.kind == ast.Kind.param) and node.text.length > 0 and node.type_id > types.never_id:
+                try self.locals.append(FileLocal(name = node.text, line = node.line, type_id = node.type_id))
+            try self.walk(node.left)
+            try self.walk(node.right)
+            try self.walk(node.body)
+            cursor = node.next
+
+    ## The type of local `name` declared on `line` (0: the last one of that name); 0 when
+    ## the check did not type it.
+    func local_type(name: str, line: u32) -> u32:
+        var found: u32 = 0
+        for local in self.locals.view():
+            if local.name != name: continue
+            if local.line == line: return local.type_id
+            found = local.type_id
+        return found
+
+    ## What `type_id` names behind pointers, optionals and fallible results: a struct,
+    ## enum, union or interface's values, or none.
+    func type_target(type_id: u32) -> Target?:
+        var id = type_id
+        for _ in 0..<8:
+            if id <= types.never_id: return none
+            let t = self.checker.table.get(id)
+            match t.kind:
+                .pointer, .optional, .fallible, .atomic:
+                    id = t.elem
+                .struct_, .enum_, .union_, .interface_:
+                    let decl = t.decl else return none
+                    let module = self.module_of(decl) else return none
+                    return Target(decl = decl, module = module, on_type = false)
+                _:
+                    return none
+        return none
+
+    ## What a declaration names when a chain reaches it: a type itself, a module, or the
+    ## values of what a field holds or a function returns.
+    func decl_target(decl: ast.Node*, module: usize) -> Target?:
+        match decl.kind:
+            .struct_, .enum_, .union_, .interface_:
+                return Target(decl = decl, module = module, on_type = true)
+            .module:
+                let index = self.module_index(decl) else return none
+                return Target(decl = none, module = index, on_type = false)
+            .func_:
+                return self.type_target(self.result_type(decl))
+            _:
+                return self.type_target(decl.type_id)
+
+    ## A function's result type: its function type's element.
+    func result_type(decl: ast.Node*) -> u32:
+        if decl.type_id <= types.never_id: return 0
+        let t = self.checker.table.get(decl.type_id)
+        return t.elem if t.kind == .func_ else 0
+
+    ## The module of a declaration: the one whose top level, or a type of whose top level,
+    ## holds it (a module's tree: that module).
+    func module_of(decl: ast.Node*) -> usize?:
+        if decl.kind == ast.Kind.module: return self.module_index(decl)
+        for (index, module) in self.checker.modules.span().indexed():
+            var cursor = module.tree.body
+            while let d = cursor:
+                if d == decl: return index
+                if d.kind == ast.Kind.struct_ or d.kind == ast.Kind.enum_ or d.kind == ast.Kind.union_ or d.kind == ast.Kind.interface_:
+                    var member = d.body
+                    while let m = member:
+                        if m == decl: return index
+                        member = m.next
+                cursor = d.next
+        return none
+
+    ## The index of the module whose tree is `tree`.
+    func module_index(tree: ast.Node*) -> usize?:
+        for (index, module) in self.checker.modules.span().indexed():
+            if module.tree == tree: return index
+        return none
+
+    ## The index of the module named `name`, its own name or as an import names it.
+    func module_named(name: str) -> usize?:
+        if let index = self.checker.find_module(name): return index
+        for (index, module) in self.checker.modules.span().indexed():
+            if module.name == name: return index
+        return none
+
+    ## Whether the file may name `decl` of module `module`: its own package's anything, another
+    ## package's public declarations only.
+    func reachable(decl: ast.Node*, module: usize) -> bool:
+        let modules = self.checker.modules.span()
+        return modules[module].package_name == modules[self.file].package_name or decl.has(ast.flag_pub)
+
+    ## The member `name` of `target` (with the module it is in); none when it has none
+    ## the file may name.
+    func member(target: Target, name: str) -> (ast.Node*, usize)?:
+        if let decl = target.decl:
+            var cursor = decl.body
+            while let m = cursor:
+                if m.text == name and self.reachable(m, target.module): return (m, target.module)
+                cursor = m.next
+            return none
+        let module = self.checker.modules.get(target.module)
+        let found = check.find_decl(module.tree, name) else return none
+        if not self.reachable(found, target.module): return none
+        return (found, target.module)
+
+    ## What a name at the file's top level is: one of its imports or its own declarations.
+    func top_name(name: str) -> (ast.Node*, usize)?:
+        var cursor = self.tree.body
+        while let d = cursor:
+            cursor = d.next
+            if d.kind == ast.Kind.import_:
+                # `import a.b`, `import a.b as c` and `from a import b` (a module): the module.
+                if import_name(d) != name: continue
+                let index = self.module_named(d.text) else return none
+                return (self.checker.modules.get(index).tree, index)
+            if d.kind == ast.Kind.from_import:
+                var imported = d.body
+                while let n = imported:
+                    imported = n.next
+                    var spelled = n.text
+                    if let alias = n.left: spelled = alias.text
+                    if spelled != name: continue
+                    let decl = n.resolved else return none
+                    let module = self.module_of(decl) else return none
+                    return (decl, module)
+                continue
+            if d.text == name: return (d, self.file)
+        return none
+
+    ## The target of a chain's links, the first a local (typed on `local_line`; none when
+    ## it is no local), an import or one of the file's declarations; none when a link is
+    ## unknown.
+    func chain_target(links: const Segment[], local_line: u32?) -> Target?:
+        var target: Target? = none
+        for (at, link) in links.indexed():
+            if at == 0:
+                if let line = local_line:
+                    target = self.type_target(self.elements(self.local_type(link.name, line), link.indexes))
+                    continue
+                let (decl, module) = self.top_name(link.name) else return none
+                target = self.reach(decl, module, link)
+            else:
+                let owner = target else return none
+                let (decl, module) = self.member(owner, link.name) else return none
+                target = self.reach(decl, module, link)
+        return target
+
+    ## What a link reaching `decl` names: the declaration's target, or for an indexed link
+    ## (`positions[i]`) the element type of the span or array it holds.
+    func reach(decl: ast.Node*, module: usize, link: Segment) -> Target?:
+        if link.indexes == 0: return self.decl_target(decl, module)
+        let held = self.result_type(decl) if decl.kind == ast.Kind.func_ else decl.type_id
+        return self.type_target(self.elements(held, link.indexes))
+
+    ## The type `count` indexes into `type_id` reach.
+    func elements(type_id: u32, count: u32) -> u32:
+        var id = type_id
+        for _ in 0..<count: id = self.element(id)
+        return id
+
+    ## The element type of a span or array (behind pointers and fallible results), else 0.
+    func element(type_id: u32) -> u32:
+        var id = type_id
+        for _ in 0..<8:
+            if id <= types.never_id: return 0
+            let t = self.checker.table.get(id)
+            match t.kind:
+                .pointer, .optional, .fallible:
+                    id = t.elem
+                .span, .array:
+                    return t.elem
+                _:
+                    return 0
+        return 0
+
+    ## Add the members of `target` starting with `prefix` to `completion`: a type's
+    ## fields and methods (its static functions and cases on the type itself), or a
+    ## module's public declarations.
+    func add_members(target: Target, prefix: str, completion: Completion*) -> !:
+        var cursor = self.checker.modules.get(target.module).tree.body
+        if let decl = target.decl: cursor = decl.body
+        while let m = cursor:
+            cursor = m.next
+            if m.text.length == 0 or not strings.starts_with(m.text, prefix): continue
+            if not self.reachable(m, target.module): continue
+            var kind = decl_kind(m) else continue
+            if target.decl != none:
+                let static_member = m.has(ast.flag_static) or m.kind == ast.Kind.enum_case
+                if static_member != target.on_type or m.text == "init": continue
+            elif kind == .method:
+                kind = .function
+            try self.add_decl(m, target.module, kind, completion)
+
+    ## Add `decl` of module `module` to `completion` as `kind`, with its signature and doc.
+    func add_decl(decl: ast.Node*, module: usize, kind: ItemKind, completion: Completion*) -> !:
+        var detail = collections.List[u8]()
+        defer detail.destroy()
+        var doc = collections.List[u8]()
+        defer doc.destroy()
+        let source = self.checker.modules.get(module).src.bytes
+        try decl_signature(source, decl, &detail)
+        try doc_above(source, decl.start, &doc)
+        try completion.add(decl.text, kind, (str)detail.view(), (str)doc.view())
+
+    ## The hover text of `decl` (of module `module`): its signature, then its doc.
+    func describe(decl: ast.Node*, module: usize, out: collections.List[u8]*) -> !:
+        let source = self.checker.modules.get(module).src.bytes
+        try decl_signature(source, decl, out)
+        var doc = collections.List[u8]()
+        defer doc.destroy()
+        try doc_above(source, decl.start, &doc)
+        if doc.length() > 0:
+            try out.append('\n')
+            for byte in doc.view(): try out.append(byte)
+
+## The name an `import_` node binds: its `as` name, else the module name's last part.
+func import_name(d: ast.Node*) -> str:
+    if let alias = d.left: return alias.text
+    let dot = strings.find_last(d.text, ".") else return d.text
+    return (str)d.text.bytes[dot + 1..]
+
+## What a completion calls a declaration; none for one it does not list.
+func decl_kind(decl: ast.Node*) -> ItemKind?:
+    return match decl.kind:
+        .func_ => ItemKind.method
+        .field, .enum_case, .constant, .global => ItemKind.field
+        .struct_, .enum_, .union_, .interface_, .type_alias => ItemKind.type_
+        _ => none
+
+## A declaration's signature as its source line writes it, the words before the name and
+## the closing colon dropped: `grid(size: f64, divisions: i64) -> Geometry!`, `x: f32`,
+## `struct Cook`. A signature broken over lines is joined until its brackets close.
+func decl_signature(source: const u8[], decl: ast.Node*, out: collections.List[u8]*) -> !:
+    var at = decl.start
+    var depth: i64 = 0
+    var space = false
+    let before = out.length()
+    while at < source.length:
+        let byte = source[at]
+        at += 1
+        if byte == '\n' or byte == '\r':
+            if depth <= 0: break
+            space = true
+            continue
+        if byte == ' ' or byte == '\t':
+            space = out.length() > before
+            continue
+        if space and out.length() > before and depth > 0 and (byte == ')' or byte == ']'): space = false
+        if space:
+            try out.append(' ')
+            space = false
+        if byte == '(' or byte == '[': depth += 1
+        elif byte == ')' or byte == ']': depth -= 1
+        try out.append(byte)
+    # Drop the words before the declaration's name and the colon that opens a body.
+    var text = (str)out.view()[before..]
+    for word in ["pub ", "static ", "func ", "let ", "var ", "case "]:
+        if strings.starts_with(text, word): text = (str)text.bytes[word.length..]
+    if (decl.kind == ast.Kind.field or decl.kind == ast.Kind.constant or decl.kind == ast.Kind.global) and strings.contains(text, " = "):
+        let equals = strings.find(text, " = ") else return
+        text = (str)text.bytes[..<equals]
+    if strings.ends_with(text, ":"): text = (str)text.bytes[..<text.length - 1]
+    var kept = collections.List[u8]()
+    defer kept.destroy()
+    for byte in text.bytes: try kept.append(byte)
+    out.truncate(before)
+    for byte in kept.view(): try out.append(byte)
+
+## The `##` lines just above the line holding byte `start`, joined by spaces.
+func doc_above(source: const u8[], start: usize, out: collections.List[u8]*) -> !:
+    # Back to the start of the declaration's line, then up over the doc lines.
+    var line_start = start
+    while line_start > 0 and source[line_start - 1] != '\n': line_start -= 1
+    var first = line_start
+    while first > 0:
+        var above = first - 1
+        while above > 0 and source[above - 1] != '\n': above -= 1
+        let line = strings.trim((str)source[above..<first - 1])
+        if not strings.starts_with(line, "##"): break
+        first = above
+    var at = first
+    while at < line_start:
+        var end = at
+        while end < line_start and source[end] != '\n': end += 1
+        let words = strings.trim((str)strings.trim((str)source[at..<end]).bytes[2..])
+        if words.length > 0:
+            if out.length() > 0: try out.append(' ')
+            for byte in words.bytes: try out.append(byte)
+        at = end + 1

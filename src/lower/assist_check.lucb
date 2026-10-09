@@ -28,10 +28,7 @@ func checked_locals(root: str, run_over: RunOver, header: str, body: str, part: 
     check_lock.lock()
     defer check_lock.unlock()
     try write_text(root, "assist.lucb", wrapped.text())
-    if library == none:
-        library = try embed.Library.create()
-    var kept = library else return
-    var result = try kept.check(root, assist_module)
+    var result = try kept_library().check(root, assist_module)
     defer result.close()
     if result.ok():
         if let tree = result.tree:

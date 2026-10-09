@@ -55,8 +55,20 @@ pub struct Compiled:
 ## Checks share the checker's process-wide state, so they take turns.
 var check_lock: sync.Mutex
 ## The standard library, checked once (about 11 ms) and kept for every later check (about
-## 0.1 ms each); under `check_lock`.
-var library: embed.Library?
+## 0.1 ms each), and the packages `check_file` keeps; under `check_lock`. Used in place:
+## a copy of a library would add the packages a check keeps to the copy alone.
+var library: embed.Library*?
+
+## The process's library, made on the first call; under `check_lock`.
+func kept_library() -> embed.Library*!:
+    if let made = library: return made
+    let storage = try new embed.Library[1] --- in memory.heap
+    storage[0] = embed.Library.create() catch failure:
+        free(storage) in memory.heap
+        error(failure.code, failure.message)
+    let made = &storage[0]
+    library = made
+    return made
 
 ## The module name of the snippet in a root.
 let snippet_module: str = "snippet"
@@ -73,10 +85,7 @@ pub func compile(root: str, run_over: RunOver, header: str, body: str, host: con
     check_lock.lock()
     defer check_lock.unlock()
     try write_text(root, "snippet.lucb", compiled.wrapped.text())
-    if library == none:
-        library = try embed.Library.create()
-    var kept = library else return compiled
-    var result = try kept.check(root, snippet_module)
+    var result = try kept_library().check(root, snippet_module)
     defer result.close()
     for d in result.diagnostics:
         try add_checked(&compiled, d)
@@ -93,9 +102,9 @@ pub func compile(root: str, run_over: RunOver, header: str, body: str, host: con
 pub func release_library():
     check_lock.lock()
     defer check_lock.unlock()
-    if let kept = library:
-        var held = kept
-        held.close()
+    if let made = library:
+        made.close()
+        free(made) in memory.heap
     library = none
 
 ## A checker diagnostic at the user's position; the generated lines' warnings (the free

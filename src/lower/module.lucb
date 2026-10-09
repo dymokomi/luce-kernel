@@ -23,6 +23,7 @@
 #
 #==============================================================================================
 import c
+import memory
 import sync
 import strings
 from luce_std import collections, files
