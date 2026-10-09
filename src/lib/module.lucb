@@ -1,0 +1,17 @@
+#==============================================================================================
+#
+#   lib - The functions a Code node's snippet calls without importing them
+#
+#   DESCRIPTION:
+#       VEX's general library in Base spelling: vector functions over `f32[4]` (a
+#       three-component value keeps lane 3 at zero), interpolation and fitting, hash-based
+#       random numbers and Perlin noise, each in the widths it supports. f64 forms carry a
+#       `64` suffix and two-component forms a `2d` suffix, since Base has no overloading.
+#
+#       The node never calls these bodies: the lowering recognizes each name and runs the
+#       engine's column operation for it. They are the same computation lane for lane, so a
+#       snippet means what it would mean as plain Base, and the engine's tests check its
+#       columns against them.
+#
+#==============================================================================================
+from luce_std import math, math32

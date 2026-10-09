@@ -1,0 +1,195 @@
+# Running a program: bind the host's columns and uniforms, lay out the register files,
+# run the chunks on the pool, and report the lowest fault.
+
+## A host column matched to a plan entry.
+struct Bound:
+    var bytes: u8[]
+    let kind: Kind
+    let components: usize
+    let component: usize
+    let register: u16
+
+## A chunk's fault, if it had one.
+struct ChunkFault:
+    var failed: bool
+    var lane: usize
+    var instruction: usize
+    var kind: FaultKind
+
+## What every worker of a run shares.
+struct Shared:
+    let program: const Program*
+    let count: usize
+    let chunk: usize
+    let loop_cap: u64
+    var workers: Worker[]
+    var inputs: Bound[]
+    var outputs: Bound[]
+    var faults: ChunkFault[]
+    var lowest: @usize
+
+## The largest chunk a run takes.
+let most_lanes: usize = 1 << 20
+
+## Run `program` over `request.count` lanes. Returns none when every lane finished, and
+## the fault of the lowest failing lane otherwise (the same at any thread count); then
+## the outputs hold partial writes, which the host discards. Columns or uniforms that do
+## not match the program's plan are an error, before anything runs.
+pub func run(program: const Program*, request: const Request*) -> Fault?!:
+    if not program.verified:
+        error(bad_program, "the program has not been verified")
+    if request.chunk == 0 or request.chunk > most_lanes:
+        error(bad_binding, "the chunk must be 1 to 1048576 lanes")
+    try check_index_range(program, request.count)
+    let inputs = try new Bound[program.input_slots.length()] ---
+    defer free(inputs)
+    try bind_columns(program.input_slots.view(), request.inputs, request.count, inputs, false)
+    let outputs = try new Bound[program.output_slots.length()] ---
+    defer free(outputs)
+    try bind_columns(program.output_slots.view(), request.outputs, request.count, outputs, true)
+    let values = try uniform_values(program, request.uniforms)
+    defer free(values)
+    if request.count == 0:
+        return none
+    let chunk = request.chunk if request.chunk < request.count else request.count
+    let chunks = (request.count + chunk - 1) // chunk
+    let offsets = try new usize[program.kinds.length()]
+    defer free(offsets)
+    let file_size = layout(program, chunk, offsets)
+    let worker_count = parallel.workers(chunks, request.threads)
+    let workers = try new Worker[worker_count] ---
+    defer free(workers)
+    var made: usize = 0
+    defer:
+        for at in 0..<made:
+            release_worker(&workers[at])
+    for at in 0..<worker_count:
+        workers[at] = try make_worker(program, file_size, offsets, chunk, values)
+        made += 1
+    let faults = try new ChunkFault[chunks]
+    defer free(faults)
+    var shared = Shared(program = program, count = request.count, chunk = chunk, loop_cap = request.loop_cap, workers = workers, inputs = inputs, outputs = outputs, faults = faults)
+    shared.lowest.store(request.count, .relaxed)
+    try parallel.for_each(chunks, (void*)&shared, run_chunk, threads = request.threads)
+    return lowest_fault(program, faults)
+
+## Lay out one worker's register file: each register holds `chunk` lanes of its kind,
+## starting on a 64-byte boundary. Returns the file's size.
+func layout(program: const Program*, chunk: usize, offsets: usize[]) -> usize:
+    var size: usize = 0
+    for (register, kind) in program.kinds.view().indexed():
+        offsets[register] = size
+        size += (chunk * kind.size() + 63) // 64 * 64
+    return size
+
+## A worker with its register file allocated and every preset register filled.
+func make_worker(program: const Program*, file_size: usize, offsets: const usize[], chunk: usize, values: const u64[]) -> Worker!:
+    let file = try memory.allocate(file_size if file_size > 0 else 64, 64)
+    errdefer free(file)
+    let exec_lanes = try new u8[chunk]
+    errdefer free(exec_lanes)
+    let counters = try new u64[(usize)program.loop_slots + 1]
+    var w = Worker(file = file, offsets = offsets, exec_lanes = exec_lanes, counters = counters, n = chunk)
+    for preset in program.presets.view():
+        fill(&w, preset.register, program.kinds.at((usize)preset.register), program.scalars.at((usize)preset.scalar).bits)
+    for (at, slot) in program.uniform_slots.view().indexed():
+        fill(&w, slot.register, slot.kind, values[at])
+    return w
+
+func release_worker(w: Worker*):
+    free(w.file)
+    free(w.exec_lanes)
+    free(w.counters)
+
+## Every lane of `register` = the scalar with `bits`.
+func fill(w: Worker*, register: u16, kind: Kind, bits: u64):
+    match kind.size():
+        1:
+            let d = w.masks(register)
+            for i in 0..<d.length: d[i] = (u8)(bits != 0)
+        4:
+            let d = w.lanes32(register)
+            for i in 0..<d.length: d[i] = (u32)bits
+        _:
+            let d = w.lanes64(register)
+            for i in 0..<d.length: d[i] = bits
+
+## Each uniform's bits for this run: the host's value, or the slot's default.
+func uniform_values(program: const Program*, given: const Uniform[]) -> u64[]!:
+    let slots = program.uniform_slots.view()
+    let values = try new u64[slots.length + 1]
+    errdefer free(values)
+    for (at, slot) in slots.indexed():
+        values[at] = slot.default
+        for uniform in given:
+            if uniform.name != slot.name:
+                continue
+            if uniform.kind != slot.kind:
+                error(bad_binding, "a uniform's kind differs from the program's")
+            values[at] = uniform.bits
+    return values
+
+## Match each plan entry to the host column of its name, checking kind, component and
+## length.
+func bind_columns(plan: const Binding[], columns: const Column[], count: usize, bound: Bound[], writing: bool) -> !:
+    for (at, entry) in plan.indexed():
+        var found = false
+        for column in columns:
+            if column.name != entry.name:
+                continue
+            if column.kind != entry.kind:
+                error(bad_binding, "a column's kind differs from the program's")
+            if writing and not column.writable:
+                error(bad_binding, "an output column was given as an input")
+            if (usize)entry.component >= column.components:
+                error(bad_binding, "a column has fewer components than the program reads")
+            let needed = count *? column.components else error(bad_binding, "a column is too large")
+            if column.bytes.length // column.kind.size() < needed:
+                error(bad_binding, "a column has fewer values than the run has lanes")
+            bound[at] = Bound(bytes = column.bytes, kind = column.kind, components = column.components, component = (usize)entry.component, register = entry.register)
+            found = true
+            break
+        if not found:
+            error(bad_binding, "a column the program uses was not given")
+
+## An element number must fit the kind an `index` instruction gives it.
+func check_index_range(program: const Program*, count: usize) -> !:
+    for ins in program.code.view():
+        if ins.op != .index or count == 0:
+            continue
+        let last = (u64)(count - 1)
+        let fits = match ins.kind:
+            .i32 => last <= 2147483647
+            .u32 => last <= 4294967295
+            .i64 => last <= 9223372036854775807
+            _ => true
+        if not fits:
+            error(bad_binding, "the run has more lanes than the element number's kind holds")
+
+## One chunk, on worker `number`.
+func run_chunk(context: void*, index: usize, number: usize) -> !:
+    let shared = (Shared*)context
+    let first = index * shared.chunk
+    if first > shared.lowest.load(.acquire):
+        return
+    let w = &shared.workers[number]
+    w.first = first
+    w.n = shared.chunk if shared.count - first > shared.chunk else shared.count - first
+    w.masked = false
+    w.failed = false
+    for at in 0..<shared.inputs.length:
+        load_input(w, &shared.inputs[at])
+    execute(w, shared)
+    if w.failed:
+        shared.faults[index] = ChunkFault(failed = true, lane = w.fault_lane, instruction = w.fault_instruction, kind = w.fault_kind)
+        _ = shared.lowest.min(w.fault_lane, .acq_rel)
+
+## The fault of the lowest failing lane over every chunk.
+func lowest_fault(program: const Program*, faults: const ChunkFault[]) -> Fault?:
+    for found in faults:
+        if not found.failed:
+            continue
+        let source = program.sources.at(found.instruction)
+        let message = source.message if source.message.length > 0 else found.kind.wording()
+        return Fault(kind = found.kind, lane = found.lane, instruction = found.instruction, line = source.line, column = source.column, message = message)
+    return none

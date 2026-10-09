@@ -1,0 +1,133 @@
+# Host builtins: operations a host adds (geometry reads, attribute lookups) beside the
+# engine's own. A builtin is a Base function over the chunk's columns, called once per
+# chunk with typed views of its argument and result registers.
+
+## The most arguments and results a builtin takes.
+pub let most_arguments: usize = 8
+pub let most_results: usize = 4
+
+## A host operation: its name, the kinds of its arguments and results, and the function
+## that computes a chunk of lanes. `run` writes every result lane and may call
+## `Call.fail(lane)` for a lane that cannot be computed, which fails the run there.
+pub struct Builtin:
+    pub let name: str
+    pub let arguments: Kind[8]
+    pub let argument_count: usize
+    pub let results: Kind[4]
+    pub let result_count: usize
+    pub let run: func(Call*) -> unit
+    pub let context: void*?
+
+## One call of a builtin over a chunk: lane `i` is element `first + i`.
+pub struct Call:
+    pub let lanes: usize
+    pub let first: usize
+    pub let context: void*?
+    let worker: Worker*
+    let site: const Site*
+    var failed: usize
+
+    ## Whether lane `lane` is active (only active lanes may fail).
+    pub func active(lane: usize) -> bool:
+        return lane < self.lanes and self.worker.on().at(lane)
+
+    ## Fail the run at `lane` when it is active and below any lane failed before.
+    pub func fail(lane: usize):
+        if self.active(lane) and lane < self.failed:
+            self.failed = lane
+
+    ## Argument `index` as f32 lanes (empty when it is not an f32 argument).
+    pub func f32_argument(index: usize) -> const f32[]:
+        return self.worker.f32s(self.argument(index, .f32))
+
+    ## Argument `index` as f64 lanes.
+    pub func f64_argument(index: usize) -> const f64[]:
+        return self.worker.f64s(self.argument(index, .f64))
+
+    ## Argument `index` as i32 lanes.
+    pub func i32_argument(index: usize) -> const i32[]:
+        return self.worker.i32s(self.argument(index, .i32))
+
+    ## Argument `index` as i64 lanes.
+    pub func i64_argument(index: usize) -> const i64[]:
+        return self.worker.i64s(self.argument(index, .i64))
+
+    ## Argument `index` as u32 lanes.
+    pub func u32_argument(index: usize) -> const u32[]:
+        return self.worker.u32s(self.argument(index, .u32))
+
+    ## Argument `index` as u64 lanes.
+    pub func u64_argument(index: usize) -> const u64[]:
+        return self.worker.u64s(self.argument(index, .u64))
+
+    ## Argument `index` as mask lanes, 0 or 1.
+    pub func mask_argument(index: usize) -> const u8[]:
+        return self.worker.masks(self.argument(index, .mask))
+
+    ## Result `index` as f32 lanes to write (empty when it is not an f32 result).
+    pub func f32_result(index: usize) -> f32[]:
+        return self.worker.f32s(self.result(index, .f32))
+
+    ## Result `index` as f64 lanes to write.
+    pub func f64_result(index: usize) -> f64[]:
+        return self.worker.f64s(self.result(index, .f64))
+
+    ## Result `index` as i32 lanes to write.
+    pub func i32_result(index: usize) -> i32[]:
+        return self.worker.i32s(self.result(index, .i32))
+
+    ## Result `index` as i64 lanes to write.
+    pub func i64_result(index: usize) -> i64[]:
+        return self.worker.i64s(self.result(index, .i64))
+
+    ## Result `index` as u32 lanes to write.
+    pub func u32_result(index: usize) -> u32[]:
+        return self.worker.u32s(self.result(index, .u32))
+
+    ## Result `index` as u64 lanes to write.
+    pub func u64_result(index: usize) -> u64[]:
+        return self.worker.u64s(self.result(index, .u64))
+
+    ## Result `index` as mask lanes to write, 0 or 1.
+    pub func mask_result(index: usize) -> u8[]:
+        return self.worker.masks(self.result(index, .mask))
+
+    # The register of argument `index` when it has `kind`, else none.
+    func argument(index: usize, kind: Kind) -> u16:
+        let builtin = &self.site.builtin
+        if index >= builtin.argument_count or builtin.arguments[index] != kind:
+            return no_register
+        return self.site.arguments[index]
+
+    # The register of result `index` when it has `kind`, else none.
+    func result(index: usize, kind: Kind) -> u16:
+        let builtin = &self.site.builtin
+        if index >= builtin.result_count or builtin.results[index] != kind:
+            return no_register
+        return self.site.results + (u16)index
+
+## The builtins a host offers, by name. A zero value is empty and ready.
+pub struct Registry:
+    var entries: collections.List[Builtin]
+
+    ## Add `builtin`; a second one of the same name, or one with too many arguments or
+    ## results, is an error.
+    pub func add(builtin: Builtin) -> !:
+        if builtin.argument_count > most_arguments or builtin.result_count > most_results:
+            error(bad_builtin, "a builtin takes at most 8 arguments and 4 results")
+        if builtin.result_count == 0:
+            error(bad_builtin, "a builtin has at least one result")
+        if self.find(builtin.name) != none:
+            error(bad_builtin, "a builtin of that name is already registered")
+        try self.entries.append(builtin)
+
+    ## The builtin called `name`.
+    pub func find(name: str) -> Builtin?:
+        for entry in self.entries.view():
+            if entry.name == name:
+                return entry
+        return none
+
+    ## Give back its storage.
+    pub func destroy():
+        self.entries.destroy()

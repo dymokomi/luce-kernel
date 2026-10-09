@@ -1,0 +1,340 @@
+# Verification: the proof the interpreter relies on. Every register an instruction names
+# exists and has the kind its operation needs, every jump lands inside the program, every
+# loop's back edge passes a `loop_step` (so no run can spin forever), nothing writes a
+# register the run fills (constants, uniforms, inputs), and every register is written on
+# every path before it is read (so no lane ever sees another chunk's leftovers).
+
+## The registers one instruction reads or writes.
+struct Registers:
+    var list: u16[24]
+    var count: usize
+
+    func add(register: u16):
+        if self.count < 24:
+            self.list[self.count] = register
+            self.count += 1
+
+    func add_run(first: u16, count: u16):
+        for k: u16 in 0..<count:
+            self.add(first + k)
+
+## Check `program`; it can run once this succeeds.
+func verify(program: Program*) -> !:
+    let count = program.kinds.length()
+    if count >= (usize)no_register:
+        error(bad_program, "too many registers")
+    if program.code.length() >= 65535:
+        error(bad_program, "too many instructions")
+    if program.sources.length() != program.code.length():
+        error(bad_program, "the fault table does not match the instructions")
+    let protected = try new bool[count + 1]
+    defer free(protected)
+    for preset in program.presets.view():
+        let kind = try register_kind(program, preset.register)
+        if (usize)preset.scalar >= program.scalars.length() or program.scalars.at((usize)preset.scalar).kind != kind:
+            error(bad_program, "a constant does not match its register")
+        protected[(usize)preset.register] = true
+    for slot in program.uniform_slots.view():
+        try expect(program, slot.register, slot.kind)
+        protected[(usize)slot.register] = true
+    for entry in program.input_slots.view():
+        try expect(program, entry.register, entry.kind)
+        protected[(usize)entry.register] = true
+    let code = program.code.view()
+    for (pc, ins) in code.indexed():
+        try check_instruction(program, ins)
+        let written = writes_of(program, ins)
+        for at in 0..<written.count:
+            if protected[(usize)written.list[at]]:
+                error(bad_program, "an instruction writes a constant, uniform or input register")
+    try check_loops(code)
+    try check_defined(program, protected)
+    program.verified = true
+
+func register_kind(program: const Program*, register: u16) -> Kind!:
+    return program.kind(register) else error(bad_program, "an instruction names a register that does not exist")
+
+func expect(program: const Program*, register: u16, kind: Kind) -> !:
+    if try register_kind(program, register) != kind:
+        error(bad_program, "an operand's kind does not match its operation")
+
+func expect_run(program: const Program*, first: u16, count: u16, kind: Kind) -> !:
+    if (usize)first + (usize)count > program.kinds.length():
+        error(bad_program, "a vector runs past the last register")
+    for k: u16 in 0..<count:
+        try expect(program, first + k, kind)
+
+func expect_integer(program: const Program*, register: u16) -> !:
+    if not (try register_kind(program, register)).is_integer():
+        error(bad_program, "an index operand is not an integer")
+
+func disjoint(first: u16, count: u16, other: u16, other_count: u16) -> !:
+    let end = (usize)first + (usize)count
+    let other_end = (usize)other + (usize)other_count
+    if (usize)first < other_end and (usize)other < end:
+        error(bad_program, "a vector result overlaps its operands")
+
+## The operation's kinds and its registers' kinds, by shape.
+func check_instruction(program: const Program*, ins: Instruction) -> !:
+    let kind = ins.kind
+    if (usize)(u8)ins.op >= op_count or (usize)(u8)kind >= kind_count:
+        error(bad_program, "an instruction's operation or kind is not known")
+    if (ins.op.kinds() & kind.bit()) == 0:
+        error(bad_program, "an operation does not take the instruction's kind")
+    let width = ins.c
+    match ins.op.shape():
+        .binary:
+            try expect(program, ins.dst, kind)
+            try expect(program, ins.a, kind)
+            try expect(program, ins.b, kind)
+        .unary, .move:
+            try expect(program, ins.dst, kind)
+            try expect(program, ins.a, kind)
+        .ternary:
+            try expect(program, ins.dst, kind)
+            try expect(program, ins.a, kind)
+            try expect(program, ins.b, kind)
+            try expect(program, ins.c, kind)
+        .compare:
+            try expect(program, ins.dst, .mask)
+            try expect(program, ins.a, kind)
+            try expect(program, ins.b, kind)
+        .classify:
+            try expect(program, ins.dst, .mask)
+            try expect(program, ins.a, kind)
+        .select:
+            try expect(program, ins.dst, kind)
+            try expect(program, ins.a, .mask)
+            try expect(program, ins.b, kind)
+            try expect(program, ins.c, kind)
+        .convert:
+            try expect(program, ins.dst, kind)
+            let source = try register_kind(program, ins.a)
+            if ins.op == .convert and source == .mask:
+                error(bad_program, "a checked conversion from a mask")
+        .index:
+            try expect(program, ins.dst, kind)
+        .fit:
+            try expect(program, ins.dst, kind)
+            try expect(program, ins.a, kind)
+            if (usize)ins.b + 4 > program.extras.length():
+                error(bad_program, "a fit's extra operands are missing")
+            for k: usize in 0..<4:
+                try expect(program, program.extras.at((usize)ins.b + k), kind)
+        .vector2:
+            if width < 2 or width > 4 or (ins.op == .cross and width != 3):
+                error(bad_program, "a vector has 2 to 4 lanes (a cross product 3)")
+            try expect_run(program, ins.a, width, kind)
+            try expect_run(program, ins.b, width, kind)
+            let results: u16 = 3 if ins.op == .cross else 1
+            try expect_run(program, ins.dst, results, kind)
+            try disjoint(ins.dst, results, ins.a, width)
+            try disjoint(ins.dst, results, ins.b, width)
+        .vector1:
+            if width < 2 or width > 4:
+                error(bad_program, "a vector has 2 to 4 lanes")
+            try expect_run(program, ins.a, width, kind)
+            let results: u16 = width if ins.op == .normalize else 1
+            try expect_run(program, ins.dst, results, kind)
+            try disjoint(ins.dst, results, ins.a, width)
+        .noise:
+            if width < 1 or width > 4:
+                error(bad_program, "noise takes 1 to 4 dimensions")
+            try expect_run(program, ins.a, width, kind)
+            try expect(program, ins.dst, kind)
+        .random:
+            try expect(program, ins.dst, kind)
+            try expect(program, ins.a, .i64)
+        .jump:
+            try expect_target(program, ins.a)
+        .branch:
+            try expect_target(program, ins.a)
+            try expect(program, ins.b, .mask)
+        .exec, .check:
+            try expect(program, ins.a, .mask)
+        .loop_start:
+            if ins.a >= program.loop_slots:
+                error(bad_program, "a loop slot that does not exist")
+        .loop_step:
+            if ins.a >= program.loop_slots:
+                error(bad_program, "a loop slot that does not exist")
+            if ins.b != no_register:
+                try expect(program, ins.b, .mask)
+        .pick:
+            if width < 1 or width > 16:
+                error(bad_program, "an indexed run has 1 to 16 registers")
+            try expect_run(program, ins.a, width, kind)
+            try expect_integer(program, ins.b)
+            try expect(program, ins.dst, kind)
+        .place:
+            if width < 1 or width > 16:
+                error(bad_program, "an indexed run has 1 to 16 registers")
+            try expect_run(program, ins.dst, width, kind)
+            try expect_integer(program, ins.a)
+            try expect(program, ins.b, kind)
+        .store:
+            if (usize)ins.dst >= program.output_slots.length() or program.output_slots.at((usize)ins.dst).kind != kind:
+                error(bad_program, "a store to an output slot that does not exist or differs in kind")
+            try expect(program, ins.a, kind)
+        .call:
+            try check_site(program, ins.dst)
+        _:
+            return
+
+func expect_target(program: const Program*, target: u16) -> !:
+    if (usize)target > program.code.length():
+        error(bad_program, "a jump past the end of the program")
+
+func check_site(program: const Program*, index: u16) -> !:
+    if (usize)index >= program.sites.length():
+        error(bad_program, "a call to a site that does not exist")
+    let site = program.sites.at((usize)index)
+    let builtin = &site.builtin
+    if builtin.argument_count > most_arguments or builtin.result_count > most_results or builtin.result_count == 0:
+        error(bad_program, "a builtin's signature is out of range")
+    for at in 0..<builtin.argument_count:
+        try expect(program, site.arguments[at], builtin.arguments[at])
+        try disjoint(site.results, (u16)builtin.result_count, site.arguments[at], 1)
+    for at in 0..<builtin.result_count:
+        try expect(program, site.results + (u16)at, builtin.results[at])
+
+## Loops cannot spin forever. A back edge (a jump to itself or earlier) comes right after
+## a `loop_step`, no jump lands on it, its loop is entered only at the top, and the loop
+## does not restart its own slot. Then every cycle passes the `loop_step` of a slot it
+## never resets (that of the back edge into its lowest instruction reaching furthest),
+## whose count reaches the cap.
+func check_loops(code: const Instruction[]) -> !:
+    for (pc, ins) in code.indexed():
+        if not is_jump(ins) or (usize)ins.a > pc:
+            continue
+        let top = (usize)ins.a
+        if pc == 0 or code[pc - 1].op != .loop_step:
+            error(bad_program, "a loop's back edge does not follow a loop_step")
+        let slot = code[pc - 1].a
+        for (at, other) in code.indexed():
+            if other.op == .loop_start and other.a == slot and at >= top and at < pc:
+                error(bad_program, "a loop restarts its own slot")
+            if not is_jump(other):
+                continue
+            let target = (usize)other.a
+            if target == pc:
+                error(bad_program, "a jump lands on a loop's back edge")
+            if target > top and target <= pc and (at < top or at > pc):
+                error(bad_program, "a jump enters a loop below its top")
+
+func is_jump(ins: Instruction) -> bool:
+    let shape = ins.op.shape()
+    return shape == .jump or shape == .branch
+
+## What an instruction reads (a masked write reads its destination too).
+func reads_of(program: const Program*, ins: Instruction) -> Registers:
+    var found = Registers()
+    let width = ins.c
+    match ins.op.shape():
+        .binary, .compare:
+            found.add(ins.a)
+            found.add(ins.b)
+        .unary, .classify, .convert, .exec, .check:
+            found.add(ins.a)
+        .move:
+            found.add(ins.a)
+            if ins.op == .assign: found.add(ins.dst)
+        .ternary, .select:
+            found.add(ins.a)
+            found.add(ins.b)
+            found.add(ins.c)
+        .fit:
+            found.add(ins.a)
+            for k: usize in 0..<4: found.add(program.extras.at((usize)ins.b + k))
+        .vector2:
+            found.add_run(ins.a, width)
+            found.add_run(ins.b, width)
+        .vector1, .noise:
+            found.add_run(ins.a, width)
+        .random:
+            found.add(ins.a)
+        .branch:
+            found.add(ins.b)
+        .loop_step:
+            if ins.b != no_register: found.add(ins.b)
+        .pick:
+            found.add_run(ins.a, width)
+            found.add(ins.b)
+        .place:
+            found.add_run(ins.dst, width)
+            found.add(ins.a)
+            found.add(ins.b)
+        .store:
+            found.add(ins.a)
+        .call:
+            let site = program.sites.at((usize)ins.dst)
+            for at in 0..<site.builtin.argument_count: found.add(site.arguments[at])
+        _:
+            return found
+    return found
+
+## What an instruction writes.
+func writes_of(program: const Program*, ins: Instruction) -> Registers:
+    var found = Registers()
+    match ins.op.shape():
+        .binary, .unary, .ternary, .compare, .classify, .select, .move, .convert, .index, .fit, .noise, .random, .pick:
+            found.add(ins.dst)
+        .vector2:
+            found.add_run(ins.dst, 3 if ins.op == .cross else 1)
+        .vector1:
+            found.add_run(ins.dst, ins.c if ins.op == .normalize else 1)
+        .place:
+            found.add_run(ins.dst, ins.c)
+        .call:
+            let site = program.sites.at((usize)ins.dst)
+            found.add_run(site.results, (u16)site.builtin.result_count)
+        _:
+            return found
+    return found
+
+## Registers written on every path before every read: a forward "definitely written"
+## analysis over the instructions, from the protected registers at the entry.
+func check_defined(program: const Program*, entry: const bool[]) -> !:
+    let code = program.code.view()
+    let count = program.kinds.length()
+    let words = (count + 63) // 64
+    let points = code.length + 1
+    let sets = try new u64[points * words + 1]
+    defer free(sets)
+    for at in 0..<sets.length: sets[at] = 0xFFFFFFFFFFFFFFFF
+    for register in 0..<words:
+        sets[register] = 0
+    for register in 0..<count:
+        if entry[register]: sets[register // 64] |= (u64)1 << (u64)(register % 64)
+    let scratch = try new u64[words + 1]
+    defer free(scratch)
+    var changed = true
+    while changed:
+        changed = false
+        for (pc, ins) in code.indexed():
+            for at in 0..<words: scratch[at] = sets[pc * words + at]
+            let written = writes_of(program, ins)
+            for at in 0..<written.count:
+                let register = (usize)written.list[at]
+                scratch[register // 64] |= (u64)1 << (u64)(register % 64)
+            let shape = ins.op.shape()
+            if shape != .jump:
+                changed = meet(sets, (pc + 1) * words, scratch, words) or changed
+            if shape == .jump or shape == .branch:
+                changed = meet(sets, (usize)ins.a * words, scratch, words) or changed
+    for (pc, ins) in code.indexed():
+        let read = reads_of(program, ins)
+        for at in 0..<read.count:
+            let register = (usize)read.list[at]
+            if (sets[pc * words + register // 64] >> (u64)(register % 64)) & 1 == 0:
+                error(bad_program, "a register may be read before it is written")
+
+## sets[at..at+words] &= incoming; whether it changed.
+func meet(sets: u64[], at: usize, incoming: const u64[], words: usize) -> bool:
+    var changed = false
+    for k in 0..<words:
+        let value = sets[at + k] & incoming[k]
+        if value != sets[at + k]:
+            sets[at + k] = value
+            changed = true
+    return changed

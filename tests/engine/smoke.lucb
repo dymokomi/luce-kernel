@@ -1,0 +1,16 @@
+test "a smoke program adds two columns":
+    var b = Builder()
+    let x = b.input("x", 0, .f32)
+    let y = b.binary(.mul, x, b.constant_f32(2.0))
+    b.store(b.output("y", 0, .f32), y)
+    var program = try b.finish()
+    defer program.destroy()
+    let xs: f32[4] = [1.0, 2.0, 3.0, 4.0]
+    var ys: f32[4]
+    let inputs = [Column.input_f32("x", xs)]
+    let outputs = [Column.output_f32("y", ys)]
+    var uniforms: Uniform[1]
+    let request = Request(count = 4, inputs = inputs, outputs = outputs, uniforms = uniforms[..<0])
+    let fault = try run(&program, &request)
+    assert(fault == none)
+    assert(ys[3] == 8.0)

@@ -1,0 +1,124 @@
+# Data movement: copies, masked assignment, select, element numbers, and indexed register
+# reads and writes. Moves work by size class, so one loop serves every kind of a width.
+
+## d = a on every live lane.
+func copy_lanes(w: Worker*, ins: Instruction):
+    match ins.kind.size():
+        1: copy8(w.masks(ins.dst), w.masks(ins.a))
+        4: copy32(w.lanes32(ins.dst), w.lanes32(ins.a))
+        _: copy64(w.lanes64(ins.dst), w.lanes64(ins.a))
+
+func copy8(d: u8[], a: const u8[]):
+    for i in 0..<d.length: d[i] = a[i]
+
+func copy32(d: u32[], a: const u32[]):
+    for i in 0..<d.length: d[i] = a[i]
+
+func copy64(d: u64[], a: const u64[]):
+    for i in 0..<d.length: d[i] = a[i]
+
+## d = a on the active lanes; inactive lanes keep d.
+func assign_lanes(w: Worker*, ins: Instruction):
+    let on = w.on()
+    if on.all:
+        copy_lanes(w, ins)
+        return
+    match ins.kind.size():
+        1: assign8(w.masks(ins.dst), w.masks(ins.a), on.exec)
+        4: assign32(w.lanes32(ins.dst), w.lanes32(ins.a), on.exec)
+        _: assign64(w.lanes64(ins.dst), w.lanes64(ins.a), on.exec)
+
+func assign8(d: u8[], a: const u8[], exec: const u8[]):
+    for i in 0..<d.length: d[i] = a[i] if exec[i] != 0 else d[i]
+
+func assign32(d: u32[], a: const u32[], exec: const u8[]):
+    for i in 0..<d.length: d[i] = a[i] if exec[i] != 0 else d[i]
+
+func assign64(d: u64[], a: const u64[], exec: const u8[]):
+    for i in 0..<d.length: d[i] = a[i] if exec[i] != 0 else d[i]
+
+## d = b where mask a is set, else c.
+func select_lanes(w: Worker*, ins: Instruction):
+    let mask = w.masks(ins.a)
+    match ins.kind.size():
+        1: select8(w.masks(ins.dst), mask, w.masks(ins.b), w.masks(ins.c))
+        4: select32(w.lanes32(ins.dst), mask, w.lanes32(ins.b), w.lanes32(ins.c))
+        _: select64(w.lanes64(ins.dst), mask, w.lanes64(ins.b), w.lanes64(ins.c))
+
+func select8(d: u8[], mask: const u8[], b: const u8[], c: const u8[]):
+    for i in 0..<d.length: d[i] = b[i] if mask[i] != 0 else c[i]
+
+func select32(d: u32[], mask: const u8[], b: const u32[], c: const u32[]):
+    for i in 0..<d.length: d[i] = b[i] if mask[i] != 0 else c[i]
+
+func select64(d: u64[], mask: const u8[], b: const u64[], c: const u64[]):
+    for i in 0..<d.length: d[i] = b[i] if mask[i] != 0 else c[i]
+
+## d = the lane's element number (`run` checks that every number fits the kind).
+func index_lanes(w: Worker*, ins: Instruction):
+    match ins.kind:
+        .i32:
+            let d = w.i32s(ins.dst)
+            for i in 0..<d.length: d[i] = (i32)(w.first + i)
+        .i64:
+            let d = w.i64s(ins.dst)
+            for i in 0..<d.length: d[i] = (i64)(w.first + i)
+        .u32:
+            let d = w.u32s(ins.dst)
+            for i in 0..<d.length: d[i] = (u32)(w.first + i)
+        _:
+            let d = w.u64s(ins.dst)
+            for i in 0..<d.length: d[i] = (u64)(w.first + i)
+
+## The value of integer register `register` at `lane` as an index among `count`, or none
+## when it is negative or not below `count`.
+func index_at(w: Worker*, program: const Program*, register: u16, lane: usize, count: u16) -> usize?:
+    let kind = program.kinds.at((usize)register)
+    var value: u64 = 0
+    match kind:
+        .i32:
+            let signed = w.i32s(register)[lane]
+            if signed < 0: return none
+            value = (u64)signed
+        .i64:
+            let signed = w.i64s(register)[lane]
+            if signed < 0: return none
+            value = (u64)signed
+        .u32: value = (u64)w.u32s(register)[lane]
+        _: value = w.u64s(register)[lane]
+    if value >= (u64)count:
+        return none
+    return (usize)value
+
+## d = register (a + b[lane]) of the `c` registers from `a`; an index out of range faults
+## on an active lane and reads register `a` on an inactive one.
+func pick_lanes(w: Worker*, ins: Instruction, program: const Program*) -> usize:
+    let on = w.on()
+    let size = ins.kind.size()
+    for lane in 0..<w.n:
+        var from_register = ins.a
+        if let at = index_at(w, program, ins.b, lane, ins.c):
+            from_register = ins.a + (u16)at
+        elif on.at(lane):
+            return lane
+        match size:
+            1: w.masks(ins.dst)[lane] = w.masks(from_register)[lane]
+            4: w.lanes32(ins.dst)[lane] = w.lanes32(from_register)[lane]
+            _: w.lanes64(ins.dst)[lane] = w.lanes64(from_register)[lane]
+    return w.n
+
+## Register (d + a[lane]) of the `c` registers from `d` = b, on active lanes; an index out
+## of range there faults.
+func place_lanes(w: Worker*, ins: Instruction, program: const Program*) -> usize:
+    let on = w.on()
+    let size = ins.kind.size()
+    for lane in 0..<w.n:
+        if not on.at(lane):
+            continue
+        let at = index_at(w, program, ins.a, lane, ins.c) else return lane
+        let to_register = ins.dst + (u16)at
+        match size:
+            1: w.masks(to_register)[lane] = w.masks(ins.b)[lane]
+            4: w.lanes32(to_register)[lane] = w.lanes32(ins.b)[lane]
+            _: w.lanes64(to_register)[lane] = w.lanes64(ins.b)[lane]
+    return w.n

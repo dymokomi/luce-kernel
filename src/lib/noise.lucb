@@ -1,0 +1,75 @@
+# Perlin noise, VEX's `noise` and `snoise`: `snoise` is signed, in `-1..1`, zero on the
+# integer lattice; `noise` is `0.5 + 0.5 * snoise`, in `0..1` centered on 0.5. Each comes
+# in 1 to 4 dimensions, computed in f32 or in f64. The 3D forms take an `f32[4]` and read
+# lanes 0 to 2.
+
+## Signed 1D noise.
+pub func snoise1(x: f32) -> f32:
+    return limit(perlin1_32(x))
+
+## Signed 2D noise.
+pub func snoise2(p: f32[2]) -> f32:
+    return limit(perlin2_32(p[0], p[1]))
+
+## Signed 3D noise of lanes 0 to 2.
+pub func snoise(p: f32[4]) -> f32:
+    return limit(perlin3_32(p[0], p[1], p[2]))
+
+## Signed 4D noise.
+pub func snoise4(p: f32[4]) -> f32:
+    return limit(perlin4_32(p[0], p[1], p[2], p[3]))
+
+## 1D noise in `0..1`.
+pub func noise1(x: f32) -> f32:
+    return 0.5 + 0.5 * snoise1(x)
+
+## 2D noise in `0..1`.
+pub func noise2(p: f32[2]) -> f32:
+    return 0.5 + 0.5 * snoise2(p)
+
+## 3D noise in `0..1` of lanes 0 to 2.
+pub func noise(p: f32[4]) -> f32:
+    return 0.5 + 0.5 * snoise(p)
+
+## 4D noise in `0..1`.
+pub func noise4(p: f32[4]) -> f32:
+    return 0.5 + 0.5 * snoise4(p)
+
+## Signed 1D noise in f64.
+pub func snoise1_64(x: f64) -> f64:
+    return limit64(perlin1_64(x))
+
+## Signed 2D noise in f64.
+pub func snoise2_64(p: f64[2]) -> f64:
+    return limit64(perlin2_64(p[0], p[1]))
+
+## Signed 3D noise in f64 of lanes 0 to 2.
+pub func snoise64(p: f64[4]) -> f64:
+    return limit64(perlin3_64(p[0], p[1], p[2]))
+
+## Signed 4D noise in f64.
+pub func snoise4_64(p: f64[4]) -> f64:
+    return limit64(perlin4_64(p[0], p[1], p[2], p[3]))
+
+## 1D noise in `0..1`, in f64.
+pub func noise1_64(x: f64) -> f64:
+    return 0.5 + 0.5 * snoise1_64(x)
+
+## 2D noise in `0..1`, in f64.
+pub func noise2_64(p: f64[2]) -> f64:
+    return 0.5 + 0.5 * snoise2_64(p)
+
+## 3D noise in `0..1`, in f64.
+pub func noise64(p: f64[4]) -> f64:
+    return 0.5 + 0.5 * snoise64(p)
+
+## 4D noise in `0..1`, in f64.
+pub func noise4_64(p: f64[4]) -> f64:
+    return 0.5 + 0.5 * snoise4_64(p)
+
+# The scaled lattice sums stay within -1..1 but for rounding; this makes it exact.
+func limit(value: f32) -> f32:
+    return -1.0 if value < -1.0 else (1.0 if value > 1.0 else value)
+
+func limit64(value: f64) -> f64:
+    return -1.0 if value < -1.0 else (1.0 if value > 1.0 else value)

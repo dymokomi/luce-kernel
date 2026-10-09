@@ -1,0 +1,65 @@
+# Test helpers: run one instruction over host arrays of any kind, in chunks of 3 lanes on
+# 2 threads, so every unit check also crosses chunk and worker boundaries.
+
+func raw_input[T](name: str, kind: Kind, values: const T[]) -> Column:
+    return Column(name = name, kind = kind, components = 1, bytes = u8[]((u8*)values.data, values.length * memory.size_of(T)), writable = false)
+
+func raw_output[T](name: str, kind: Kind, values: T[]) -> Column:
+    return Column(name = name, kind = kind, components = 1, bytes = u8[]((u8*)values.data, values.length * memory.size_of(T)), writable = true)
+
+func no_uniforms() -> const Uniform[]:
+    var none_given: const Uniform[]
+    return none_given
+
+## Run `program` over the given columns; the fault, if any.
+func run_columns(program: const Program*, count: usize, inputs: const Column[], outputs: const Column[], threads: usize = 2, chunk: usize = 3) -> Fault?!:
+    let request = Request(count = count, inputs = inputs, outputs = outputs, uniforms = no_uniforms(), threads = threads, chunk = chunk)
+    return try run(program, &request)
+
+## d = op a, with d of `result` kind.
+func unary_case[T, R](op: Op, kind: Kind, a: const T[], d: R[], result: Kind) -> Fault?!:
+    var b = Builder()
+    let x = b.input("a", 0, kind)
+    let value = b.classify(op, x) if result == .mask and kind != .mask else b.unary(op, x)
+    b.store(b.output("d", 0, result), value)
+    var program = try b.finish()
+    defer program.destroy()
+    return try run_columns(&program, d.length, [raw_input("a", kind, a)], [raw_output("d", result, d)])
+
+## d = a op b, with d of `result` kind (a mask for compares).
+func binary_case[T, R](op: Op, kind: Kind, a: const T[], b: const T[], d: R[], result: Kind) -> Fault?!:
+    var builder = Builder()
+    let x = builder.input("a", 0, kind)
+    let y = builder.input("b", 0, kind)
+    let value = builder.compare(op, x, y) if result == .mask and op.shape() == .compare else builder.binary(op, x, y)
+    builder.store(builder.output("d", 0, result), value)
+    var program = try builder.finish()
+    defer program.destroy()
+    return try run_columns(&program, d.length, [raw_input("a", kind, a), raw_input("b", kind, b)], [raw_output("d", result, d)])
+
+## d = op(a, b, c).
+func ternary_case[T](op: Op, kind: Kind, a: const T[], b: const T[], c: const T[], d: T[]) -> Fault?!:
+    var builder = Builder()
+    let value = builder.ternary(op, builder.input("a", 0, kind), builder.input("b", 0, kind), builder.input("c", 0, kind))
+    builder.store(builder.output("d", 0, kind), value)
+    var program = try builder.finish()
+    defer program.destroy()
+    let inputs = [raw_input("a", kind, a), raw_input("b", kind, b), raw_input("c", kind, c)]
+    return try run_columns(&program, d.length, inputs, [raw_output("d", kind, d)])
+
+## d = cast or convert of a, from `source` to `target`.
+func conversion_case[S, D](op: Op, source: Kind, target: Kind, a: const S[], d: D[]) -> Fault?!:
+    var builder = Builder()
+    let x = builder.input("a", 0, source)
+    let value = builder.convert(x, target) if op == .convert else builder.cast(x, target)
+    builder.store(builder.output("d", 0, target), value)
+    var program = try builder.finish()
+    defer program.destroy()
+    return try run_columns(&program, d.length, [raw_input("a", source, a)], [raw_output("d", target, d)])
+
+## Equal bits, or both NaN.
+func same_f32(x: f32, y: f32) -> bool:
+    return x.bits() == y.bits() or (math32.is_nan(x) and math32.is_nan(y))
+
+func same_f64(x: f64, y: f64) -> bool:
+    return x.bits() == y.bits() or (math.is_nan(x) and math.is_nan(y))

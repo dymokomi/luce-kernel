@@ -1,0 +1,250 @@
+# Operations: what an instruction does, the registers it reads and writes (its shape), and
+# the kinds it accepts. An instruction's `kind` is its destination's kind, except for the
+# operations whose result is a mask (compares and classifications), where it is the
+# operands' kind.
+
+## One column operation. Arithmetic follows Base: `add` on integers is checked and faults
+## on overflow, `wadd` wraps (`+%`), `sadd` saturates (`+|`); `div` is float division,
+## `idiv` and `rem` are C's `//` and `%`.
+pub enum Op as u8:
+    # Data
+    copy = 0
+    assign = 1
+    select = 2
+    index = 3
+    # Binary arithmetic and bits
+    add = 4
+    sub = 5
+    mul = 6
+    div = 7
+    wadd = 8
+    wsub = 9
+    wmul = 10
+    sadd = 11
+    ssub = 12
+    smul = 13
+    idiv = 14
+    rem = 15
+    min = 16
+    max = 17
+    band = 18
+    bor = 19
+    bxor = 20
+    shl = 21
+    shr = 22
+    pow = 23
+    atan2 = 24
+    fmod = 25
+    hypot = 26
+    # Unary
+    neg = 27
+    wneg = 28
+    abs = 29
+    bnot = 30
+    sqrt = 31
+    cbrt = 32
+    exp = 33
+    exp2 = 34
+    log = 35
+    log2 = 36
+    log10 = 37
+    sin = 38
+    cos = 39
+    tan = 40
+    asin = 41
+    acos = 42
+    atan = 43
+    sinh = 44
+    cosh = 45
+    tanh = 46
+    floor = 47
+    ceil = 48
+    round = 49
+    trunc = 50
+    frac = 51
+    sign = 52
+    degrees = 53
+    radians = 54
+    # Classification and comparison (mask results)
+    isnan = 55
+    isinf = 56
+    isfinite = 57
+    eq = 58
+    ne = 59
+    lt = 60
+    le = 61
+    gt = 62
+    ge = 63
+    # Conversion: `convert` is Base's checked `T(x)`, `cast` its C cast `(T)x`
+    convert = 64
+    cast = 65
+    # Ternary and interpolation
+    mul_add = 66
+    lerp = 67
+    clamp = 68
+    smooth = 69
+    fit01 = 70
+    fit = 71
+    # Vectors: a vector is `width` consecutive registers
+    dot = 72
+    cross = 73
+    length = 74
+    length2 = 75
+    distance = 76
+    distance2 = 77
+    normalize = 78
+    # Noise and random
+    noise = 79
+    snoise = 80
+    rand = 81
+    # Control
+    jump = 82
+    jump_if_true = 83
+    jump_if_false = 84
+    jump_if_any = 85
+    jump_if_none = 86
+    exec = 87
+    exec_all = 88
+    loop_start = 89
+    loop_step = 90
+    # Faults
+    check = 91
+    trap = 92
+    # Indexed registers, outputs, host builtins
+    pick = 93
+    place = 94
+    store = 95
+    call = 96
+
+## How many operations there are.
+let op_count: usize = 97
+
+## The register pattern of an operation, which `verify` checks.
+enum Shape:
+    ## d = f(a, b), all of the instruction's kind.
+    binary
+    ## d = f(a).
+    unary
+    ## d = f(a, b, c).
+    ternary
+    ## mask d = f(a, b), operands of the instruction's kind.
+    compare
+    ## mask d = f(a).
+    classify
+    ## d = a ? b : c, with `a` a mask.
+    select
+    ## d = a (`copy`, `assign`).
+    move
+    ## d = convert(a), `a` of any kind `cast` or `convert` takes.
+    convert
+    ## d = the lane's element number.
+    index
+    ## d = fit(a, extras[b..b+4]).
+    fit
+    ## d = f(vector a, vector b) of `c` lanes; `cross` writes 3 registers.
+    vector2
+    ## d = f(vector a) of `c` lanes; `normalize` writes `c` registers.
+    vector1
+    ## d = noise(vector a of `c` lanes, 1 to 4).
+    noise
+    ## d = rand(i64 seed a, stream c).
+    random
+    ## jump to a.
+    jump
+    ## jump to a when mask b says so.
+    branch
+    ## exec mask = a.
+    exec
+    ## exec mask = every lane.
+    exec_all
+    ## loop slot a starts.
+    loop_start
+    ## loop slot a counts one round of the lanes in mask b (none: every lane).
+    loop_step
+    ## fault where mask a is false.
+    check
+    ## fault at the lowest active lane.
+    trap
+    ## d = register (a + b[lane]) among `c`.
+    pick
+    ## register (d + a[lane]) among `c` = b.
+    place
+    ## output slot d = a.
+    store
+    ## builtin call site d.
+    call
+
+extend Op:
+    ## The register pattern.
+    func shape() -> Shape:
+        let value = (u8)self
+        if value >= 4 and value <= 26: return .binary
+        if value >= 27 and value <= 54: return .unary
+        if value >= 55 and value <= 57: return .classify
+        if value >= 58 and value <= 63: return .compare
+        return match self:
+            .copy, .assign => Shape.move
+            .select => Shape.select
+            .index => Shape.index
+            .convert, .cast => Shape.convert
+            .mul_add, .lerp, .clamp, .smooth, .fit01 => Shape.ternary
+            .fit => Shape.fit
+            .dot, .cross, .distance, .distance2 => Shape.vector2
+            .length, .length2, .normalize => Shape.vector1
+            .noise, .snoise => Shape.noise
+            .rand => Shape.random
+            .jump => Shape.jump
+            .jump_if_true, .jump_if_false, .jump_if_any, .jump_if_none => Shape.branch
+            .exec => Shape.exec
+            .exec_all => Shape.exec_all
+            .loop_start => Shape.loop_start
+            .loop_step => Shape.loop_step
+            .check => Shape.check
+            .trap => Shape.trap
+            .pick => Shape.pick
+            .place => Shape.place
+            .store => Shape.store
+            _ => Shape.call
+
+    ## The kinds the instruction's `kind` may be.
+    func kinds() -> Kinds:
+        return match self:
+            .copy, .assign, .select, .pick, .place, .store, .cast => any_kind
+            .index => integers
+            .add, .sub, .mul, .min, .max, .clamp => numbers
+            .wadd, .wsub, .wmul, .sadd, .ssub, .smul, .idiv, .rem, .shl, .shr, .wneg => integers
+            .band, .bor, .bxor, .bnot => integers | masks
+            .neg, .abs => floats | signed_integers
+            .eq, .ne => numbers | masks
+            .lt, .le, .gt, .ge, .convert => numbers
+            .jump, .jump_if_true, .jump_if_false, .jump_if_any, .jump_if_none => any_kind
+            .exec, .exec_all, .loop_start, .loop_step, .check, .trap, .call => any_kind
+            _ => floats
+
+    ## Whether the operation reads its destination (a masked write keeps inactive lanes).
+    func reads_destination() -> bool:
+        return self == .assign or self == .place
+
+    ## Whether it can fault.
+    func can_fault() -> bool:
+        return match self:
+            .add, .sub, .mul, .idiv, .rem, .neg, .abs, .shl, .shr, .convert => true
+            .loop_step, .check, .trap, .pick, .place, .call => true
+            _ => false
+
+    ## The Base-like name, for listings and messages.
+    pub func name() -> str:
+        return op_names[(usize)self]
+
+let op_names: str[97] = [
+    "copy", "assign", "select", "index", "add", "sub", "mul", "div", "wadd", "wsub",
+    "wmul", "sadd", "ssub", "smul", "idiv", "rem", "min", "max", "band", "bor",
+    "bxor", "shl", "shr", "pow", "atan2", "fmod", "hypot", "neg", "wneg", "abs",
+    "bnot", "sqrt", "cbrt", "exp", "exp2", "log", "log2", "log10", "sin", "cos",
+    "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "floor", "ceil", "round",
+    "trunc", "frac", "sign", "degrees", "radians", "isnan", "isinf", "isfinite", "eq", "ne",
+    "lt", "le", "gt", "ge", "convert", "cast", "mul_add", "lerp", "clamp", "smooth",
+    "fit01", "fit", "dot", "cross", "length", "length2", "distance", "distance2", "normalize", "noise",
+    "snoise", "rand", "jump", "jump_if_true", "jump_if_false", "jump_if_any", "jump_if_none", "exec", "exec_all", "loop_start",
+    "loop_step", "check", "trap", "pick", "place", "store", "call",
+]

@@ -1,0 +1,9 @@
+# The errors the engine returns. A program that faults while running is not an error: it
+# is a `Fault`, the run's result.
+
+## A builtin was refused by `Registry.add`.
+pub let bad_builtin: ErrorCode = ErrorCode.package(1)
+## A program was refused by `Builder.finish` (a lowering bug, never the user's code).
+pub let bad_program: ErrorCode = ErrorCode.package(2)
+## A run's columns or uniforms do not match the program's plan.
+pub let bad_binding: ErrorCode = ErrorCode.package(3)

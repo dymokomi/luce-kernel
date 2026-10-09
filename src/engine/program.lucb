@@ -1,0 +1,126 @@
+# A column program: registers, instructions, the scalar table, the fault table and the
+# column plan. Built by `Builder`, checked by `verify`, run by `run`.
+
+## The absent register: `exec` of every lane, a `loop_step` over every lane.
+pub let no_register: u16 = 0xFFFF
+
+## One instruction: `op` over registers `dst`, `a`, `b`, `c` (fields an operation does not
+## use are zero); `kind` is the destination's kind, or the operands' for mask results.
+pub struct Instruction:
+    pub let op: Op
+    pub let kind: Kind
+    pub let dst: u16
+    pub let a: u16
+    pub let b: u16
+    pub let c: u16
+
+## Where an instruction came from: a 1-based line and column of the user's text, and the
+## message a fault there reports (empty for the fault kind's own wording).
+pub struct Source:
+    pub let line: u32
+    pub let column: u32
+    pub let message: str
+
+## One scalar of the scalar table, as its kind and its bits (`f32.bits()` widened).
+pub struct Scalar:
+    pub let kind: Kind
+    pub let bits: u64
+
+## A register every lane of which holds one scalar for the whole run: a constant or a
+## uniform. Workers fill it once per run.
+struct Preset:
+    let register: u16
+    let scalar: u32
+
+## A named scalar the host sets per run (a parameter, a detail value, the frame); its
+## default stands when the host leaves it out.
+pub struct UniformSlot:
+    pub let name: str
+    pub let kind: Kind
+    pub let register: u16
+    pub let default: u64
+
+## A column the program reads or writes: component `component` of the host column
+## `name`, of `kind`. An input is bound to `register` at the start of every chunk; an
+## output is written by `store` instructions naming its slot.
+pub struct Binding:
+    pub let name: str
+    pub let component: u16
+    pub let kind: Kind
+    pub let register: u16
+
+## A builtin call site: the builtin, its argument registers, and the first of its
+## consecutive result registers.
+struct Site:
+    let builtin: Builtin
+    let arguments: u16[8]
+    let results: u16
+
+## A verified program, ready to run any number of times on any number of threads at once.
+## It owns its storage: `destroy` gives it back.
+pub struct Program:
+    var kinds: collections.List[Kind]
+    var scalars: collections.List[Scalar]
+    var presets: collections.List[Preset]
+    var uniform_slots: collections.List[UniformSlot]
+    var input_slots: collections.List[Binding]
+    var output_slots: collections.List[Binding]
+    var code: collections.List[Instruction]
+    var sources: collections.List[Source]
+    var extras: collections.List[u16]
+    var sites: collections.List[Site]
+    var texts: collections.TextPool
+    var loop_slots: u16
+    var verified: bool
+
+    ## How many registers it uses.
+    pub func register_count() -> usize:
+        return self.kinds.length()
+
+    ## The kind of register `register`, or none past the last.
+    pub func kind(register: u16) -> Kind?:
+        if (usize)register >= self.kinds.length():
+            return none
+        return self.kinds.at((usize)register)
+
+    ## The instructions, in order.
+    pub func instructions() -> const Instruction[]:
+        return self.code.view()
+
+    ## Where instruction `index` came from (the fault table).
+    pub func source(index: usize) -> Source?:
+        if index >= self.sources.length():
+            return none
+        return self.sources.at(index)
+
+    ## The input columns it binds, in plan order.
+    pub func inputs() -> const Binding[]:
+        return self.input_slots.view()
+
+    ## The output columns it writes, by slot.
+    pub func outputs() -> const Binding[]:
+        return self.output_slots.view()
+
+    ## The uniforms the host may set.
+    pub func uniforms() -> const UniformSlot[]:
+        return self.uniform_slots.view()
+
+    ## Whether `verify` accepted it; only a verified program runs.
+    pub func is_verified() -> bool:
+        return self.verified
+
+    ## Give back its storage; it is empty afterwards.
+    pub func destroy():
+        self.kinds.destroy()
+        self.scalars.destroy()
+        self.presets.destroy()
+        self.uniform_slots.destroy()
+        self.input_slots.destroy()
+        self.output_slots.destroy()
+        self.code.destroy()
+        self.sources.destroy()
+        self.extras.destroy()
+        self.sites.destroy()
+        self.texts.destroy()
+        self.loop_slots = 0
+        self.verified = false

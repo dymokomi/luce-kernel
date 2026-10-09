@@ -1,0 +1,72 @@
+# Interpolation, fitting and angle units.
+
+## `a` moved toward `b` by `t`: `a + (b - a) * t` (VEX `lerp`).
+pub func lerp(a: f32, b: f32, t: f32) -> f32:
+    return a + (b - a) * t
+
+## `lerp` in f64.
+pub func lerp64(a: f64, b: f64, t: f64) -> f64:
+    return a + (b - a) * t
+
+## `x` held to `low..high`: `low` below it, `high` above it, `x` itself (a NaN included)
+## otherwise.
+pub func clamp(x: f32, low: f32, high: f32) -> f32:
+    return low if x < low else (high if x > high else x)
+
+## `clamp` in f64.
+pub func clamp64(x: f64, low: f64, high: f64) -> f64:
+    return low if x < low else (high if x > high else x)
+
+## `x` clamped to `0..1` and mapped onto `new_low..new_high` (VEX `fit01`).
+pub func fit01(x: f32, new_low: f32, new_high: f32) -> f32:
+    return lerp(new_low, new_high, clamp(x, 0.0, 1.0))
+
+## `fit01` in f64.
+pub func fit01_64(x: f64, new_low: f64, new_high: f64) -> f64:
+    return lerp64(new_low, new_high, clamp64(x, 0.0, 1.0))
+
+## `x` clamped to the old range and mapped onto the new one (VEX `fit`). A reversed old
+## range maps in reverse; an empty one maps everything to `new_low`.
+pub func fit(x: f32, old_low: f32, old_high: f32, new_low: f32, new_high: f32) -> f32:
+    if old_low == old_high:
+        return new_low
+    let held = clamp(x, old_low, old_high) if old_low < old_high else clamp(x, old_high, old_low)
+    return lerp(new_low, new_high, (held - old_low) / (old_high - old_low))
+
+## `fit` in f64.
+pub func fit64(x: f64, old_low: f64, old_high: f64, new_low: f64, new_high: f64) -> f64:
+    if old_low == old_high:
+        return new_low
+    let held = clamp64(x, old_low, old_high) if old_low < old_high else clamp64(x, old_high, old_low)
+    return lerp64(new_low, new_high, (held - old_low) / (old_high - old_low))
+
+## 0 at or below `low`, 1 at or above `high`, and the smooth Hermite rise
+## `t * t * (3 - 2 * t)` between (VEX `smooth`).
+pub func smooth(low: f32, high: f32, x: f32) -> f32:
+    if x <= low: return 0.0
+    if x >= high: return 1.0
+    let t = (x - low) / (high - low)
+    return t * t * (3.0 - 2.0 * t)
+
+## `smooth` in f64.
+pub func smooth64(low: f64, high: f64, x: f64) -> f64:
+    if x <= low: return 0.0
+    if x >= high: return 1.0
+    let t = (x - low) / (high - low)
+    return t * t * (3.0 - 2.0 * t)
+
+## Radians to degrees.
+pub func degrees(radians_value: f32) -> f32:
+    return radians_value * (180.0 / math32.pi)
+
+## `degrees` in f64.
+pub func degrees64(radians_value: f64) -> f64:
+    return radians_value * (180.0 / math.pi)
+
+## Degrees to radians.
+pub func radians(degrees_value: f32) -> f32:
+    return degrees_value * (math32.pi / 180.0)
+
+## `radians` in f64.
+pub func radians64(degrees_value: f64) -> f64:
+    return degrees_value * (math.pi / 180.0)

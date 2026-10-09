@@ -1,0 +1,230 @@
+# Improved Perlin noise (Perlin 2002): quintic fade, a 256-entry permutation, and
+# gradients chosen from the hash's low bits, as in Stefan Gustavson's public-domain
+# noise1234. Each dimension's sum is scaled into -1..1. The f32 and f64 forms are the
+# same computation in their own width.
+
+let permutation: u8[256] = [
+    151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30,
+    69, 142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94,
+    252, 219, 203, 117, 35, 11, 32, 57, 177, 33, 88, 237, 149, 56, 87, 174, 20, 125, 136, 171,
+    168, 68, 175, 74, 165, 71, 134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111, 229, 122, 60,
+    211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244, 102, 143, 54, 65, 25, 63, 161, 1,
+    216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196, 135, 130, 116, 188, 159, 86,
+    164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123, 5, 202, 38, 147, 118,
+    126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170,
+    213, 119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39,
+    253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228, 251, 34,
+    242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107, 49,
+    192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254,
+    138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180,
+]
+
+# The hash of a lattice cell: each coordinate is reduced to 0..255 first.
+func mix(cell: usize, next: usize) -> usize:
+    return (usize)permutation[(cell + next) & 255]
+
+func lattice(value: i64) -> usize:
+    return (usize)(value & 255)
+
+func fade32(t: f32) -> f32:
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+func fade64(t: f64) -> f64:
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+# Gradients: 1D slopes ±1..±8; 2D eight directions (±1, ±2) and (±2, ±1); 3D the twelve
+# cube edge directions (with four repeated); 4D the 32 directions with one zero lane.
+func grad1_32(hash_value: usize, x: f32) -> f32:
+    let slope = 1.0 + (f32)(hash_value & 7)
+    return -slope * x if (hash_value & 8) != 0 else slope * x
+
+func grad2_32(hash_value: usize, x: f32, y: f32) -> f32:
+    let h = hash_value & 7
+    let u = x if h < 4 else y
+    let v = y if h < 4 else x
+    return (-u if (h & 1) != 0 else u) + (-2.0 * v if (h & 2) != 0 else 2.0 * v)
+
+func grad3_32(hash_value: usize, x: f32, y: f32, z: f32) -> f32:
+    let h = hash_value & 15
+    let u = x if h < 8 else y
+    let v = y if h < 4 else (x if h == 12 or h == 14 else z)
+    return (-u if (h & 1) != 0 else u) + (-v if (h & 2) != 0 else v)
+
+func grad4_32(hash_value: usize, x: f32, y: f32, z: f32, t: f32) -> f32:
+    let h = hash_value & 31
+    let u = x if h < 24 else y
+    let v = y if h < 16 else z
+    let w = z if h < 8 else t
+    return (-u if (h & 1) != 0 else u) + (-v if (h & 2) != 0 else v) + (-w if (h & 4) != 0 else w)
+
+func grad1_64(hash_value: usize, x: f64) -> f64:
+    let slope = 1.0 + (f64)(hash_value & 7)
+    return -slope * x if (hash_value & 8) != 0 else slope * x
+
+func grad2_64(hash_value: usize, x: f64, y: f64) -> f64:
+    let h = hash_value & 7
+    let u = x if h < 4 else y
+    let v = y if h < 4 else x
+    return (-u if (h & 1) != 0 else u) + (-2.0 * v if (h & 2) != 0 else 2.0 * v)
+
+func grad3_64(hash_value: usize, x: f64, y: f64, z: f64) -> f64:
+    let h = hash_value & 15
+    let u = x if h < 8 else y
+    let v = y if h < 4 else (x if h == 12 or h == 14 else z)
+    return (-u if (h & 1) != 0 else u) + (-v if (h & 2) != 0 else v)
+
+func grad4_64(hash_value: usize, x: f64, y: f64, z: f64, t: f64) -> f64:
+    let h = hash_value & 31
+    let u = x if h < 24 else y
+    let v = y if h < 16 else z
+    let w = z if h < 8 else t
+    return (-u if (h & 1) != 0 else u) + (-v if (h & 2) != 0 else v) + (-w if (h & 4) != 0 else w)
+
+# One lattice coordinate: the cell (saturating for huge or NaN input) and the offset.
+func split32(x: f32) -> (usize, f32):
+    let floored = math32.floor(x)
+    return (lattice((i64)floored), x - floored)
+
+func split64(x: f64) -> (usize, f64):
+    let floored = math.floor(x)
+    return (lattice((i64)floored), x - floored)
+
+func perlin1_32(x: f32) -> f32:
+    let (ix, fx) = split32(x)
+    let s = fade32(fx)
+    let n0 = grad1_32(mix(ix, 0), fx)
+    let n1 = grad1_32(mix(ix + 1, 0), fx - 1.0)
+    return 0.188 * (n0 + s * (n1 - n0))
+
+func perlin2_32(x: f32, y: f32) -> f32:
+    let (ix, fx) = split32(x)
+    let (iy, fy) = split32(y)
+    let s = fade32(fx)
+    let t = fade32(fy)
+    let a = mix(ix, 0)
+    let b = mix(ix + 1, 0)
+    let n00 = grad2_32(mix(a, iy), fx, fy)
+    let n01 = grad2_32(mix(a, iy + 1), fx, fy - 1.0)
+    let n10 = grad2_32(mix(b, iy), fx - 1.0, fy)
+    let n11 = grad2_32(mix(b, iy + 1), fx - 1.0, fy - 1.0)
+    let n0 = n00 + t * (n01 - n00)
+    let n1 = n10 + t * (n11 - n10)
+    return 0.507 * (n0 + s * (n1 - n0))
+
+func perlin3_32(x: f32, y: f32, z: f32) -> f32:
+    let (ix, fx) = split32(x)
+    let (iy, fy) = split32(y)
+    let (iz, fz) = split32(z)
+    let r = fade32(fz)
+    let t = fade32(fy)
+    let s = fade32(fx)
+    let a = mix(ix, 0)
+    let b = mix(ix + 1, 0)
+    let aa = mix(a, iy)
+    let ab = mix(a, iy + 1)
+    let ba = mix(b, iy)
+    let bb = mix(b, iy + 1)
+    let x0 = blend32(r, grad3_32(mix(aa, iz), fx, fy, fz), grad3_32(mix(aa, iz + 1), fx, fy, fz - 1.0))
+    let x1 = blend32(r, grad3_32(mix(ab, iz), fx, fy - 1.0, fz), grad3_32(mix(ab, iz + 1), fx, fy - 1.0, fz - 1.0))
+    let x2 = blend32(r, grad3_32(mix(ba, iz), fx - 1.0, fy, fz), grad3_32(mix(ba, iz + 1), fx - 1.0, fy, fz - 1.0))
+    let x3 = blend32(r, grad3_32(mix(bb, iz), fx - 1.0, fy - 1.0, fz), grad3_32(mix(bb, iz + 1), fx - 1.0, fy - 1.0, fz - 1.0))
+    return 0.936 * blend32(s, blend32(t, x0, x1), blend32(t, x2, x3))
+
+func perlin4_32(x: f32, y: f32, z: f32, w: f32) -> f32:
+    let (ix, fx) = split32(x)
+    let (iy, fy) = split32(y)
+    let (iz, fz) = split32(z)
+    let (iw, fw) = split32(w)
+    let fade_x = fade32(fx)
+    let fade_y = fade32(fy)
+    let fade_z = fade32(fz)
+    let fade_w = fade32(fw)
+    var corners: f32[16]
+    for corner: usize in 0..<16:
+        let dx = corner & 1
+        let dy = (corner >> 1) & 1
+        let dz = (corner >> 2) & 1
+        let dw = (corner >> 3) & 1
+        let cell = mix(mix(mix(mix(ix + dx, 0), iy + dy), iz + dz), iw + dw)
+        corners[corner] = grad4_32(cell, fx - (f32)dx, fy - (f32)dy, fz - (f32)dz, fw - (f32)dw)
+    # Fold the 16 corners along w, then z, then y, then x.
+    for half: usize in 0..<8:
+        corners[half] = blend32(fade_w, corners[half], corners[half + 8])
+    for half: usize in 0..<4:
+        corners[half] = blend32(fade_z, corners[half], corners[half + 4])
+    for half: usize in 0..<2:
+        corners[half] = blend32(fade_y, corners[half], corners[half + 2])
+    return 0.87 * blend32(fade_x, corners[0], corners[1])
+
+func perlin1_64(x: f64) -> f64:
+    let (ix, fx) = split64(x)
+    let s = fade64(fx)
+    let n0 = grad1_64(mix(ix, 0), fx)
+    let n1 = grad1_64(mix(ix + 1, 0), fx - 1.0)
+    return 0.188 * (n0 + s * (n1 - n0))
+
+func perlin2_64(x: f64, y: f64) -> f64:
+    let (ix, fx) = split64(x)
+    let (iy, fy) = split64(y)
+    let s = fade64(fx)
+    let t = fade64(fy)
+    let a = mix(ix, 0)
+    let b = mix(ix + 1, 0)
+    let n00 = grad2_64(mix(a, iy), fx, fy)
+    let n01 = grad2_64(mix(a, iy + 1), fx, fy - 1.0)
+    let n10 = grad2_64(mix(b, iy), fx - 1.0, fy)
+    let n11 = grad2_64(mix(b, iy + 1), fx - 1.0, fy - 1.0)
+    let n0 = n00 + t * (n01 - n00)
+    let n1 = n10 + t * (n11 - n10)
+    return 0.507 * (n0 + s * (n1 - n0))
+
+func perlin3_64(x: f64, y: f64, z: f64) -> f64:
+    let (ix, fx) = split64(x)
+    let (iy, fy) = split64(y)
+    let (iz, fz) = split64(z)
+    let r = fade64(fz)
+    let t = fade64(fy)
+    let s = fade64(fx)
+    let a = mix(ix, 0)
+    let b = mix(ix + 1, 0)
+    let aa = mix(a, iy)
+    let ab = mix(a, iy + 1)
+    let ba = mix(b, iy)
+    let bb = mix(b, iy + 1)
+    let x0 = blend64(r, grad3_64(mix(aa, iz), fx, fy, fz), grad3_64(mix(aa, iz + 1), fx, fy, fz - 1.0))
+    let x1 = blend64(r, grad3_64(mix(ab, iz), fx, fy - 1.0, fz), grad3_64(mix(ab, iz + 1), fx, fy - 1.0, fz - 1.0))
+    let x2 = blend64(r, grad3_64(mix(ba, iz), fx - 1.0, fy, fz), grad3_64(mix(ba, iz + 1), fx - 1.0, fy, fz - 1.0))
+    let x3 = blend64(r, grad3_64(mix(bb, iz), fx - 1.0, fy - 1.0, fz), grad3_64(mix(bb, iz + 1), fx - 1.0, fy - 1.0, fz - 1.0))
+    return 0.936 * blend64(s, blend64(t, x0, x1), blend64(t, x2, x3))
+
+func perlin4_64(x: f64, y: f64, z: f64, w: f64) -> f64:
+    let (ix, fx) = split64(x)
+    let (iy, fy) = split64(y)
+    let (iz, fz) = split64(z)
+    let (iw, fw) = split64(w)
+    let fade_x = fade64(fx)
+    let fade_y = fade64(fy)
+    let fade_z = fade64(fz)
+    let fade_w = fade64(fw)
+    var corners: f64[16]
+    for corner: usize in 0..<16:
+        let dx = corner & 1
+        let dy = (corner >> 1) & 1
+        let dz = (corner >> 2) & 1
+        let dw = (corner >> 3) & 1
+        let cell = mix(mix(mix(mix(ix + dx, 0), iy + dy), iz + dz), iw + dw)
+        corners[corner] = grad4_64(cell, fx - (f64)dx, fy - (f64)dy, fz - (f64)dz, fw - (f64)dw)
+    for half: usize in 0..<8:
+        corners[half] = blend64(fade_w, corners[half], corners[half + 8])
+    for half: usize in 0..<4:
+        corners[half] = blend64(fade_z, corners[half], corners[half + 4])
+    for half: usize in 0..<2:
+        corners[half] = blend64(fade_y, corners[half], corners[half + 2])
+    return 0.87 * blend64(fade_x, corners[0], corners[1])
+
+# The lattice blend: `a` toward `b` by `t` (argument order of Perlin's reference).
+func blend32(t: f32, a: f32, b: f32) -> f32:
+    return a + t * (b - a)
+
+func blend64(t: f64, a: f64, b: f64) -> f64:
+    return a + t * (b - a)

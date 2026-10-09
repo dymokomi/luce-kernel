@@ -1,0 +1,176 @@
+# Float lane operations beyond the generated ones: fit, vector functions, noise and
+# random numbers. Each computes what the matching `lib` function computes, lane by lane.
+
+## d = fit(a, old_low, old_high, new_low, new_high), the last four from the extras table.
+func fit_lanes(w: Worker*, ins: Instruction, program: const Program*):
+    let at = (usize)ins.b
+    let extras = program.extras.view()
+    if ins.kind == .f32:
+        let d = w.f32s(ins.dst)
+        let a = w.f32s(ins.a)
+        let old_low = w.f32s(extras[at])
+        let old_high = w.f32s(extras[at + 1])
+        let new_low = w.f32s(extras[at + 2])
+        let new_high = w.f32s(extras[at + 3])
+        for i in 0..<d.length: d[i] = lib.fit(a[i], old_low[i], old_high[i], new_low[i], new_high[i])
+    else:
+        let d = w.f64s(ins.dst)
+        let a = w.f64s(ins.a)
+        let old_low = w.f64s(extras[at])
+        let old_high = w.f64s(extras[at + 1])
+        let new_low = w.f64s(extras[at + 2])
+        let new_high = w.f64s(extras[at + 3])
+        for i in 0..<d.length: d[i] = lib.fit64(a[i], old_low[i], old_high[i], new_low[i], new_high[i])
+
+## The vector operations over `c` consecutive registers.
+func vector_lanes(w: Worker*, ins: Instruction):
+    if ins.kind == .f32:
+        vector32(w, ins)
+    else:
+        vector64(w, ins)
+
+func vector32(w: Worker*, ins: Instruction):
+    let width = (u16)ins.c
+    match ins.op:
+        .dot:
+            let d = w.f32s(ins.dst)
+            product32(d, w.f32s(ins.a), w.f32s(ins.b))
+            for k: u16 in 1..<width: add_product32(d, w.f32s(ins.a + k), w.f32s(ins.b + k))
+        .length, .length2:
+            let d = w.f32s(ins.dst)
+            product32(d, w.f32s(ins.a), w.f32s(ins.a))
+            for k: u16 in 1..<width: add_product32(d, w.f32s(ins.a + k), w.f32s(ins.a + k))
+            if ins.op == .length:
+                for i in 0..<d.length: d[i] = math32.sqrt(d[i])
+        .distance, .distance2:
+            let d = w.f32s(ins.dst)
+            square_difference32(d, w.f32s(ins.a), w.f32s(ins.b), false)
+            for k: u16 in 1..<width: square_difference32(d, w.f32s(ins.a + k), w.f32s(ins.b + k), true)
+            if ins.op == .distance:
+                for i in 0..<d.length: d[i] = math32.sqrt(d[i])
+        .cross:
+            let (x, y, z) = (w.f32s(ins.dst), w.f32s(ins.dst + 1), w.f32s(ins.dst + 2))
+            let (ax, ay, az) = (w.f32s(ins.a), w.f32s(ins.a + 1), w.f32s(ins.a + 2))
+            let (bx, by, bz) = (w.f32s(ins.b), w.f32s(ins.b + 1), w.f32s(ins.b + 2))
+            for i in 0..<x.length:
+                x[i] = ay[i] * bz[i] - az[i] * by[i]
+                y[i] = az[i] * bx[i] - ax[i] * bz[i]
+                z[i] = ax[i] * by[i] - ay[i] * bx[i]
+        _:
+            normalize32(w, ins.dst, ins.a, width)
+
+func product32(d: f32[], a: const f32[], b: const f32[]):
+    for i in 0..<d.length: d[i] = a[i] * b[i]
+
+func add_product32(d: f32[], a: const f32[], b: const f32[]):
+    for i in 0..<d.length: d[i] = d[i] + a[i] * b[i]
+
+func square_difference32(d: f32[], a: const f32[], b: const f32[], accumulate: bool):
+    for i in 0..<d.length:
+        let difference = a[i] - b[i]
+        d[i] = d[i] + difference * difference if accumulate else difference * difference
+
+func normalize32(w: Worker*, to_register: u16, from_register: u16, width: u16):
+    for i in 0..<w.n:
+        var sum: f32 = 0.0
+        for k: u16 in 0..<width:
+            let value = w.f32s(from_register + k)[i]
+            sum = value * value if k == 0 else sum + value * value
+        let size = math32.sqrt(sum)
+        let scale: f32 = 0.0 if size == 0.0 else 1.0 / size
+        for k: u16 in 0..<width:
+            w.f32s(to_register + k)[i] = w.f32s(from_register + k)[i] * scale
+
+func vector64(w: Worker*, ins: Instruction):
+    let width = (u16)ins.c
+    match ins.op:
+        .dot:
+            let d = w.f64s(ins.dst)
+            product64(d, w.f64s(ins.a), w.f64s(ins.b))
+            for k: u16 in 1..<width: add_product64(d, w.f64s(ins.a + k), w.f64s(ins.b + k))
+        .length, .length2:
+            let d = w.f64s(ins.dst)
+            product64(d, w.f64s(ins.a), w.f64s(ins.a))
+            for k: u16 in 1..<width: add_product64(d, w.f64s(ins.a + k), w.f64s(ins.a + k))
+            if ins.op == .length:
+                for i in 0..<d.length: d[i] = math.sqrt(d[i])
+        .distance, .distance2:
+            let d = w.f64s(ins.dst)
+            square_difference64(d, w.f64s(ins.a), w.f64s(ins.b), false)
+            for k: u16 in 1..<width: square_difference64(d, w.f64s(ins.a + k), w.f64s(ins.b + k), true)
+            if ins.op == .distance:
+                for i in 0..<d.length: d[i] = math.sqrt(d[i])
+        .cross:
+            let (x, y, z) = (w.f64s(ins.dst), w.f64s(ins.dst + 1), w.f64s(ins.dst + 2))
+            let (ax, ay, az) = (w.f64s(ins.a), w.f64s(ins.a + 1), w.f64s(ins.a + 2))
+            let (bx, by, bz) = (w.f64s(ins.b), w.f64s(ins.b + 1), w.f64s(ins.b + 2))
+            for i in 0..<x.length:
+                x[i] = ay[i] * bz[i] - az[i] * by[i]
+                y[i] = az[i] * bx[i] - ax[i] * bz[i]
+                z[i] = ax[i] * by[i] - ay[i] * bx[i]
+        _:
+            normalize64(w, ins.dst, ins.a, width)
+
+func product64(d: f64[], a: const f64[], b: const f64[]):
+    for i in 0..<d.length: d[i] = a[i] * b[i]
+
+func add_product64(d: f64[], a: const f64[], b: const f64[]):
+    for i in 0..<d.length: d[i] = d[i] + a[i] * b[i]
+
+func square_difference64(d: f64[], a: const f64[], b: const f64[], accumulate: bool):
+    for i in 0..<d.length:
+        let difference = a[i] - b[i]
+        d[i] = d[i] + difference * difference if accumulate else difference * difference
+
+func normalize64(w: Worker*, to_register: u16, from_register: u16, width: u16):
+    for i in 0..<w.n:
+        var sum: f64 = 0.0
+        for k: u16 in 0..<width:
+            let value = w.f64s(from_register + k)[i]
+            sum = value * value if k == 0 else sum + value * value
+        let size = math.sqrt(sum)
+        let scale: f64 = 0.0 if size == 0.0 else 1.0 / size
+        for k: u16 in 0..<width:
+            w.f64s(to_register + k)[i] = w.f64s(from_register + k)[i] * scale
+
+## d = noise or snoise of the `c`-dimensional point in registers `a..a+c`.
+func noise_lanes(w: Worker*, ins: Instruction):
+    let signed = ins.op == .snoise
+    let dimensions = (u16)ins.c
+    if ins.kind == .f32:
+        let d = w.f32s(ins.dst)
+        let x = w.f32s(ins.a)
+        let y = w.f32s(ins.a + 1) if dimensions > 1 else x
+        let z = w.f32s(ins.a + 2) if dimensions > 2 else x
+        let t = w.f32s(ins.a + 3) if dimensions > 3 else x
+        for i in 0..<d.length:
+            let value = match dimensions:
+                1 => lib.snoise1(x[i])
+                2 => lib.snoise2([x[i], y[i]])
+                3 => lib.snoise([x[i], y[i], z[i], 0.0])
+                _ => lib.snoise4([x[i], y[i], z[i], t[i]])
+            d[i] = value if signed else 0.5 + 0.5 * value
+    else:
+        let d = w.f64s(ins.dst)
+        let x = w.f64s(ins.a)
+        let y = w.f64s(ins.a + 1) if dimensions > 1 else x
+        let z = w.f64s(ins.a + 2) if dimensions > 2 else x
+        let t = w.f64s(ins.a + 3) if dimensions > 3 else x
+        for i in 0..<d.length:
+            let value = match dimensions:
+                1 => lib.snoise1_64(x[i])
+                2 => lib.snoise2_64([x[i], y[i]])
+                3 => lib.snoise64([x[i], y[i], z[i], 0.0])
+                _ => lib.snoise4_64([x[i], y[i], z[i], t[i]])
+            d[i] = value if signed else 0.5 + 0.5 * value
+
+## d = rand_stream(seed a, stream c).
+func rand_lanes(w: Worker*, ins: Instruction):
+    let seeds = w.i64s(ins.a)
+    let stream = (u32)ins.c
+    if ins.kind == .f32:
+        let d = w.f32s(ins.dst)
+        for i in 0..<d.length: d[i] = lib.rand_stream(seeds[i], stream)
+    else:
+        let d = w.f64s(ins.dst)
+        for i in 0..<d.length: d[i] = lib.rand_stream64(seeds[i], stream)

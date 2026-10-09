@@ -1,0 +1,80 @@
+# Moving lanes between host columns and registers: inputs at the start of a chunk,
+# outputs at each `store`, and builtin calls. Lengths were checked by `bind_columns`, so
+# every index here is within its column.
+
+## Copy the chunk's lanes of an input column into its register.
+func load_input(w: Worker*, bound: const Bound*):
+    let from_value = w.first * bound.components + bound.component
+    let step = bound.components
+    match bound.kind.size():
+        1: gather8(w.masks(bound.register), bound.bytes, from_value, step, bound.kind == .mask)
+        4: gather32(w.lanes32(bound.register), words_of(bound.bytes), from_value, step)
+        _: gather64(w.lanes64(bound.register), doubles_of(bound.bytes), from_value, step)
+
+func gather8(d: u8[], source: const u8[], from_value: usize, step: usize, as_mask: bool):
+    for i in 0..<d.length:
+        let value = source[from_value + i * step]
+        d[i] = (u8)(value != 0) if as_mask else value
+
+func gather32(d: u32[], source: const u32[], from_value: usize, step: usize):
+    if step == 1:
+        let part = source[from_value..<from_value + d.length]
+        for i in 0..<d.length: d[i] = part[i]
+        return
+    for i in 0..<d.length: d[i] = source[from_value + i * step]
+
+func gather64(d: u64[], source: const u64[], from_value: usize, step: usize):
+    if step == 1:
+        let part = source[from_value..<from_value + d.length]
+        for i in 0..<d.length: d[i] = part[i]
+        return
+    for i in 0..<d.length: d[i] = source[from_value + i * step]
+
+## Write register `a`'s active lanes into output slot `dst`.
+func store_lanes(w: Worker*, ins: Instruction, shared: const Shared*):
+    let bound = &shared.outputs[(usize)ins.dst]
+    let on = w.on()
+    let from_value = w.first * bound.components + bound.component
+    let step = bound.components
+    match bound.kind.size():
+        1: scatter8(bytes_of(bound.bytes), w.masks(ins.a), from_value, step, on)
+        4: scatter32(words_of(bound.bytes), w.lanes32(ins.a), from_value, step, on)
+        _: scatter64(doubles_of(bound.bytes), w.lanes64(ins.a), from_value, step, on)
+
+func scatter8(d: u8[], a: const u8[], from_value: usize, step: usize, on: Active):
+    for i in 0..<a.length:
+        if on.at(i): d[from_value + i * step] = a[i]
+
+func scatter32(d: u32[], a: const u32[], from_value: usize, step: usize, on: Active):
+    if step == 1 and on.all:
+        let part = d[from_value..<from_value + a.length]
+        for i in 0..<a.length: part[i] = a[i]
+        return
+    for i in 0..<a.length:
+        if on.at(i): d[from_value + i * step] = a[i]
+
+func scatter64(d: u64[], a: const u64[], from_value: usize, step: usize, on: Active):
+    if step == 1 and on.all:
+        let part = d[from_value..<from_value + a.length]
+        for i in 0..<a.length: part[i] = a[i]
+        return
+    for i in 0..<a.length:
+        if on.at(i): d[from_value + i * step] = a[i]
+
+## A host column's bytes as 4-byte and 8-byte lanes (the host gave typed, aligned spans).
+func words_of(bytes: u8[]) -> u32[]:
+    return u32[]((u32*)bytes.data, bytes.length // 4)
+
+func doubles_of(bytes: u8[]) -> u64[]:
+    return u64[]((u64*)bytes.data, bytes.length // 8)
+
+func bytes_of(bytes: u8[]) -> u8[]:
+    return bytes
+
+## Call a builtin over the chunk; the lowest lane it failed, or the lane count.
+func call_lanes(w: Worker*, ins: Instruction, program: const Program*) -> usize:
+    let site = &program.sites.view()[(usize)ins.dst]
+    var call = Call(lanes = w.n, first = w.first, context = site.builtin.context, worker = w, site = site, failed = w.n)
+    let entry = site.builtin.run
+    entry(&call)
+    return call.failed

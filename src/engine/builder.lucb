@@ -1,0 +1,490 @@
+# Building a program. The lowering (and tests) call one method per operation; each returns
+# its result register. Registers are SSA by default: every result is a fresh register,
+# and `assign` is the one way to change a register already written (a variable in a
+# masked branch or a loop). A builder's mistakes are sticky: the first is kept, later
+# calls do nothing, and `finish` reports it, so the lowering checks once at the end.
+
+## A place in the program for jumps; `bind` sets it once, before or after the jumps.
+pub struct Label:
+    let id: u32
+
+## Makes one program. A zero value is ready; `finish` hands the program over, `destroy`
+## drops an unfinished one.
+pub struct Builder:
+    var program: Program
+    var labels: collections.List[u32]
+    var line: u32
+    var column: u32
+    var failed: bool
+    var failure: str
+
+    ## Instructions emitted from now on came from `line` and `column` of the user's text.
+    pub func at(line: u32, column: u32):
+        self.line = line
+        self.column = column
+
+    ## Whether a call so far was refused (`finish` says why).
+    pub func has_failed() -> bool:
+        return self.failed
+
+    # mark: Registers ========================================================================
+
+    ## A fresh register of `kind`.
+    pub func register(kind: Kind) -> u16:
+        return self.vector(kind, 1)
+
+    ## `width` fresh consecutive registers of `kind` (a vector, an array): the first.
+    pub func vector(kind: Kind, width: usize) -> u16:
+        let first = self.program.kinds.length()
+        if self.failed or width == 0 or first + width >= (usize)no_register:
+            self.fail("too many registers")
+            return no_register
+        for _ in 0..<width:
+            self.program.kinds.append(kind) catch failure:
+                self.fail("out of memory")
+                return no_register
+        return (u16)first
+
+    ## The kind of `register`, if it exists.
+    pub func kind_of(register: u16) -> Kind?:
+        return self.program.kind(register)
+
+    ## A register holding `value` on every lane (equal constants share one register).
+    pub func constant_f32(value: f32) -> u16:
+        return self.constant(.f32, (u64)value.bits())
+
+    ## An f64 constant.
+    pub func constant_f64(value: f64) -> u16:
+        return self.constant(.f64, value.bits())
+
+    ## An i32 constant.
+    pub func constant_i32(value: i32) -> u16:
+        return self.constant(.i32, (u64)(u32)value)
+
+    ## An i64 constant.
+    pub func constant_i64(value: i64) -> u16:
+        return self.constant(.i64, (u64)value)
+
+    ## A u32 constant.
+    pub func constant_u32(value: u32) -> u16:
+        return self.constant(.u32, (u64)value)
+
+    ## A u64 constant.
+    pub func constant_u64(value: u64) -> u16:
+        return self.constant(.u64, value)
+
+    ## A mask constant: every lane true or every lane false.
+    pub func constant_mask(value: bool) -> u16:
+        return self.constant(.mask, 1 if value else 0)
+
+    ## A constant of `kind` from its bits (`f32.bits()` widened, an integer's two's
+    ## complement).
+    pub func constant(kind: Kind, bits: u64) -> u16:
+        for preset in self.program.presets.view():
+            let scalar = self.program.scalars.at((usize)preset.scalar)
+            if scalar.kind == kind and scalar.bits == bits:
+                return preset.register
+        let register = self.register(kind)
+        if self.failed:
+            return no_register
+        let index = (u32)self.program.scalars.length()
+        self.program.scalars.append(Scalar(kind = kind, bits = bits)) catch failure:
+            self.fail("out of memory")
+            return no_register
+        self.program.presets.append(Preset(register = register, scalar = index)) catch failure:
+            self.fail("out of memory")
+            return no_register
+        return register
+
+    ## A register holding uniform `name` on every lane: the host's value for the run, or
+    ## `default`. Asking again for the same name gives the same register.
+    pub func uniform_f32(name: str, default: f32) -> u16:
+        return self.uniform(name, .f32, (u64)default.bits())
+
+    ## An f64 uniform.
+    pub func uniform_f64(name: str, default: f64) -> u16:
+        return self.uniform(name, .f64, default.bits())
+
+    ## An i32 uniform.
+    pub func uniform_i32(name: str, default: i32) -> u16:
+        return self.uniform(name, .i32, (u64)(u32)default)
+
+    ## An i64 uniform.
+    pub func uniform_i64(name: str, default: i64) -> u16:
+        return self.uniform(name, .i64, (u64)default)
+
+    ## A mask uniform.
+    pub func uniform_mask(name: str, default: bool) -> u16:
+        return self.uniform(name, .mask, 1 if default else 0)
+
+    ## A uniform of `kind` with default bits.
+    pub func uniform(name: str, kind: Kind, default: u64) -> u16:
+        for slot in self.program.uniform_slots.view():
+            if slot.name == name:
+                if slot.kind != kind: self.fail("a uniform asked for in two kinds")
+                return slot.register
+        let register = self.register(kind)
+        let kept = self.keep(name)
+        if self.failed:
+            return no_register
+        self.program.uniform_slots.append(UniformSlot(name = kept, kind = kind, register = register, default = default)) catch failure:
+            self.fail("out of memory")
+        return register
+
+    ## A register holding component `component` of the host's input column `name` (the
+    ## same register when asked again). It must not be written: copy it to change it.
+    pub func input(name: str, component: usize, kind: Kind) -> u16:
+        for entry in self.program.input_slots.view():
+            if entry.name == name and (usize)entry.component == component:
+                if entry.kind != kind: self.fail("an input asked for in two kinds")
+                return entry.register
+        let register = self.register(kind)
+        let kept = self.keep(name)
+        if self.failed or component > 65535:
+            self.fail("an input component out of range")
+            return no_register
+        self.program.input_slots.append(Binding(name = kept, component = (u16)component, kind = kind, register = register)) catch failure:
+            self.fail("out of memory")
+        return register
+
+    ## The output slot for component `component` of the host's output column `name`, for
+    ## `store` (the same slot when asked again).
+    pub func output(name: str, component: usize, kind: Kind) -> u16:
+        for (at, entry) in self.program.output_slots.view().indexed():
+            if entry.name == name and (usize)entry.component == component:
+                if entry.kind != kind: self.fail("an output asked for in two kinds")
+                return (u16)at
+        let slot = self.program.output_slots.length()
+        let kept = self.keep(name)
+        if self.failed or component > 65535 or slot >= 65535:
+            self.fail("an output out of range")
+            return no_register
+        self.program.output_slots.append(Binding(name = kept, component = (u16)component, kind = kind, register = no_register)) catch failure:
+            self.fail("out of memory")
+        return (u16)slot
+
+    # mark: Operations =======================================================================
+
+    ## Emit one instruction as given. Jumps go through `jump` and its siblings instead.
+    pub func emit(op: Op, kind: Kind, dst: u16, a: u16, b: u16, c: u16):
+        let shape = op.shape()
+        if shape == .jump or shape == .branch:
+            self.fail("jumps are emitted with jump and a label")
+            return
+        self.append(op, kind, dst, a, b, c, "")
+
+    ## d = a op b (`add`, `mul`, `min`, `shl`, ...), of a's kind.
+    pub func binary(op: Op, a: u16, b: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(kind)
+        self.emit(op, kind, dst, a, b, 0)
+        return dst
+
+    ## d = op a (`neg`, `sqrt`, `sin`, `floor`, ...), of a's kind.
+    pub func unary(op: Op, a: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(kind)
+        self.emit(op, kind, dst, a, 0, 0)
+        return dst
+
+    ## d = op(a, b, c) (`mul_add`, `lerp`, `clamp`, `smooth`, `fit01`), of a's kind.
+    pub func ternary(op: Op, a: u16, b: u16, c: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(kind)
+        self.emit(op, kind, dst, a, b, c)
+        return dst
+
+    ## mask d = a op b (`eq`, `lt`, ...).
+    pub func compare(op: Op, a: u16, b: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(.mask)
+        self.emit(op, kind, dst, a, b, 0)
+        return dst
+
+    ## mask d = op a (`isnan`, `isinf`, `isfinite`).
+    pub func classify(op: Op, a: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(.mask)
+        self.emit(op, kind, dst, a, 0, 0)
+        return dst
+
+    ## d = then_value where `mask`, else else_value.
+    pub func select(mask: u16, then_value: u16, else_value: u16) -> u16:
+        let kind = self.kind_or_fail(then_value)
+        let dst = self.register(kind)
+        self.emit(.select, kind, dst, mask, then_value, else_value)
+        return dst
+
+    ## A fresh copy of `a`.
+    pub func copy(a: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(kind)
+        self.emit(.copy, kind, dst, a, 0, 0)
+        return dst
+
+    ## to_register = a on the active lanes (the exec mask's); the rest keep their value.
+    pub func assign(to_register: u16, a: u16):
+        self.emit(.assign, self.kind_or_fail(to_register), to_register, a, 0, 0)
+
+    ## Base's checked `kind(a)`: a value that does not fit faults.
+    pub func convert(a: u16, kind: Kind) -> u16:
+        let dst = self.register(kind)
+        self.emit(.convert, kind, dst, a, 0, 0)
+        return dst
+
+    ## Base's C cast `(kind)a`: truncating, saturating, never faulting.
+    pub func cast(a: u16, kind: Kind) -> u16:
+        let dst = self.register(kind)
+        self.emit(.cast, kind, dst, a, 0, 0)
+        return dst
+
+    ## The lane's element number, as `kind`.
+    pub func index(kind: Kind) -> u16:
+        let dst = self.register(kind)
+        self.emit(.index, kind, dst, 0, 0, 0)
+        return dst
+
+    ## VEX `fit`: x clamped to the old range, mapped onto the new one.
+    pub func fit(x: u16, old_low: u16, old_high: u16, new_low: u16, new_high: u16) -> u16:
+        let kind = self.kind_or_fail(x)
+        let at = self.program.extras.length()
+        for operand in [old_low, old_high, new_low, new_high]:
+            self.program.extras.append(operand) catch failure:
+                self.fail("out of memory")
+        if at >= 65535:
+            self.fail("too many extra operands")
+        let dst = self.register(kind)
+        self.emit(.fit, kind, dst, x, (u16)at, 0)
+        return dst
+
+    ## The dot product of two `width`-lane vectors (registers a.. and b..).
+    pub func dot(a: u16, b: u16, width: usize) -> u16:
+        return self.vector_to_scalar(.dot, a, b, width)
+
+    ## The cross product of two 3-lane vectors: the first of three result registers.
+    pub func cross(a: u16, b: u16) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.vector(kind, 3)
+        self.emit(.cross, kind, dst, a, b, 3)
+        return dst
+
+    ## The length of a vector.
+    pub func length(a: u16, width: usize) -> u16:
+        return self.vector_to_scalar(.length, a, a, width)
+
+    ## The squared length of a vector.
+    pub func length2(a: u16, width: usize) -> u16:
+        return self.vector_to_scalar(.length2, a, a, width)
+
+    ## The distance between two points.
+    pub func distance(a: u16, b: u16, width: usize) -> u16:
+        return self.vector_to_scalar(.distance, a, b, width)
+
+    ## The squared distance between two points.
+    pub func distance2(a: u16, b: u16, width: usize) -> u16:
+        return self.vector_to_scalar(.distance2, a, b, width)
+
+    ## `a` scaled to length 1 (zero stays zero): the first of `width` result registers.
+    pub func normalize(a: u16, width: usize) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.vector(kind, width)
+        self.emit(.normalize, kind, dst, a, 0, (u16)width)
+        return dst
+
+    ## Perlin noise in `0..1` of the `dimensions`-lane point in registers from `point`.
+    pub func noise(point: u16, dimensions: usize) -> u16:
+        return self.noise_of(.noise, point, dimensions)
+
+    ## Signed Perlin noise in `-1..1`.
+    pub func snoise(point: u16, dimensions: usize) -> u16:
+        return self.noise_of(.snoise, point, dimensions)
+
+    ## `rand_stream(seed, stream)` in `[0, 1)` as `kind` (f32 or f64); `seed` is i64.
+    pub func rand(seed: u16, kind: Kind, stream: u16) -> u16:
+        let dst = self.register(kind)
+        self.emit(.rand, kind, dst, seed, 0, stream)
+        return dst
+
+    ## Register (first + index) of `count` registers, lane by lane; an index outside
+    ## `0..<count` faults with bounds.
+    pub func pick(first: u16, count: usize, index: u16) -> u16:
+        let kind = self.kind_or_fail(first)
+        let dst = self.register(kind)
+        self.emit(.pick, kind, dst, first, index, (u16)count)
+        return dst
+
+    ## Register (first + index) of `count` registers = value, on the active lanes.
+    pub func place(first: u16, count: usize, index: u16, value: u16):
+        self.emit(.place, self.kind_or_fail(value), first, index, value, (u16)count)
+
+    ## Write `value`'s active lanes to output slot `slot`.
+    pub func store(slot: u16, value: u16):
+        self.emit(.store, self.kind_or_fail(value), slot, value, 0, 0)
+
+    ## Call host builtin `builtin` on `arguments`: the first of its consecutive result
+    ## registers.
+    pub func call(builtin: Builtin, arguments: const u16[]) -> u16:
+        if arguments.length != builtin.argument_count or arguments.length > most_arguments or builtin.result_count == 0 or builtin.result_count > most_results:
+            self.fail("a builtin called with the wrong number of arguments")
+            return no_register
+        let results = self.vector(builtin.results[0], builtin.result_count)
+        if self.failed:
+            return no_register
+        # The results may differ in kind: give each its own.
+        for at in 1..<builtin.result_count:
+            self.program.kinds.set((usize)results + at, builtin.results[at])
+        var registers: u16[8]
+        for (at, register) in arguments.indexed():
+            registers[at] = register
+        let site = Site(builtin = builtin, arguments = registers, results = results)
+        let index = self.program.sites.length()
+        self.program.sites.append(site) catch failure:
+            self.fail("out of memory")
+            return no_register
+        self.emit(.call, builtin.results[0], (u16)index, 0, 0, 0)
+        return results
+
+    # mark: Control ==========================================================================
+
+    ## A new, unbound label.
+    pub func label() -> Label:
+        let id = (u32)self.labels.length()
+        self.labels.append(0xFFFFFFFF) catch failure:
+            self.fail("out of memory")
+        return Label(id = id)
+
+    ## Bind `label` to the next instruction.
+    pub func bind(label: Label):
+        if (usize)label.id >= self.labels.length() or self.labels.at((usize)label.id) != 0xFFFFFFFF:
+            self.fail("a label bound twice or not made here")
+            return
+        self.labels.set((usize)label.id, (u32)self.program.code.length())
+
+    ## Jump to `label`.
+    pub func jump(label: Label):
+        self.append(.jump, .mask, 0, (u16)label.id, 0, 0, "")
+
+    ## Jump to `label` when lane 0 of `mask` is set: a uniform branch (the mask must be
+    ## the same on every lane).
+    pub func jump_if_true(mask: u16, label: Label):
+        self.append(.jump_if_true, .mask, 0, (u16)label.id, mask, 0, "")
+
+    ## Jump to `label` when lane 0 of `mask` is clear: a uniform branch.
+    pub func jump_if_false(mask: u16, label: Label):
+        self.append(.jump_if_false, .mask, 0, (u16)label.id, mask, 0, "")
+
+    ## Jump to `label` when any live lane of `mask` is set (a masked loop's latch).
+    pub func jump_if_any(mask: u16, label: Label):
+        self.append(.jump_if_any, .mask, 0, (u16)label.id, mask, 0, "")
+
+    ## Jump to `label` when no live lane of `mask` is set (skip a branch nobody takes).
+    pub func jump_if_none(mask: u16, label: Label):
+        self.append(.jump_if_none, .mask, 0, (u16)label.id, mask, 0, "")
+
+    ## Make `mask` the exec mask: faults, stores and `assign` act on its lanes only.
+    pub func exec(mask: u16):
+        self.emit(.exec, .mask, 0, mask, 0, 0)
+
+    ## Every lane active again.
+    pub func exec_all():
+        self.emit(.exec_all, .mask, 0, 0, 0, 0)
+
+    ## A fresh loop slot, which counts one loop's rounds.
+    pub func loop_slot() -> u16:
+        let slot = self.program.loop_slots
+        if slot >= 65534:
+            self.fail("too many loops")
+            return 0
+        self.program.loop_slots += 1
+        return slot
+
+    ## Start counting the rounds of loop `slot` (before the loop's top).
+    pub func loop_start(slot: u16):
+        self.emit(.loop_start, .mask, 0, slot, 0, 0)
+
+    ## Count one round of loop `slot` for the lanes in `mask` (`no_register`: every
+    ## lane); past the run's cap the lowest such lane faults. Comes right before every
+    ## jump back to the loop's top.
+    pub func loop_step(slot: u16, mask: u16):
+        self.emit(.loop_step, .mask, 0, slot, mask, 0)
+
+    ## Fault on the active lanes where `mask` is false: Base's `assert`, with `message`
+    ## (empty for "assert failed").
+    pub func check(mask: u16, message: str):
+        let kept = self.keep(message)
+        self.append(.check, .mask, 0, mask, 0, 0, kept)
+
+    ## Fault on the lowest active lane: Base's `trap(message)`.
+    pub func trap(message: str):
+        let kept = self.keep(message)
+        self.append(.trap, .mask, 0, 0, 0, 0, kept)
+
+    # mark: Finishing ========================================================================
+
+    ## The program, verified and ready to run; the builder is empty afterwards. The first
+    ## refused call, an unbound label, or a program `verify` rejects is an error.
+    pub func finish() -> Program!:
+        if self.failed:
+            error(bad_program, self.failure)
+        for at in 0..<self.program.code.length():
+            let ins = self.program.code.at(at)
+            let shape = ins.op.shape()
+            if shape != .jump and shape != .branch:
+                continue
+            let target = self.labels.at((usize)ins.a)
+            if target == 0xFFFFFFFF:
+                error(bad_program, "a jump to a label never bound")
+            self.program.code.set(at, Instruction(op = ins.op, kind = ins.kind, dst = ins.dst, a = (u16)target, b = ins.b, c = ins.c))
+        var program = self.program
+        self.program = Program()
+        self.labels.destroy()
+        errdefer program.destroy()
+        try verify(&program)
+        return program
+
+    ## Drop an unfinished program.
+    pub func destroy():
+        self.program.destroy()
+        self.labels.destroy()
+
+    # mark: Helpers ==========================================================================
+
+    func append(op: Op, kind: Kind, dst: u16, a: u16, b: u16, c: u16, message: str):
+        if self.failed:
+            return
+        self.program.code.append(Instruction(op = op, kind = kind, dst = dst, a = a, b = b, c = c)) catch failure:
+            self.fail("out of memory")
+            return
+        self.program.sources.append(Source(line = self.line, column = self.column, message = message)) catch failure:
+            self.fail("out of memory")
+
+    func vector_to_scalar(op: Op, a: u16, b: u16, width: usize) -> u16:
+        let kind = self.kind_or_fail(a)
+        let dst = self.register(kind)
+        self.emit(op, kind, dst, a, b, (u16)width)
+        return dst
+
+    func noise_of(op: Op, point: u16, dimensions: usize) -> u16:
+        let kind = self.kind_or_fail(point)
+        let dst = self.register(kind)
+        self.emit(op, kind, dst, point, 0, (u16)dimensions)
+        return dst
+
+    func kind_or_fail(register: u16) -> Kind:
+        if let kind = self.program.kind(register):
+            return kind
+        self.fail("an operand register that does not exist")
+        return .f32
+
+    func keep(text: str) -> str:
+        if text.length == 0 or self.failed:
+            return ""
+        return self.program.texts.keep_text(text.bytes) catch failure:
+            self.fail("out of memory")
+            recover ""
+
+    func fail(message: str):
+        if self.failed:
+            return
+        self.failed = true
+        self.failure = message

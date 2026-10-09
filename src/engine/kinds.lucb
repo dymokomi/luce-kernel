@@ -1,0 +1,65 @@
+# Register kinds: the storage type of one lane of a register.
+
+## The type of a register's lanes. Masks hold 0 or 1 per lane, one byte each.
+pub enum Kind as u8:
+    f32 = 0
+    f64 = 1
+    i32 = 2
+    i64 = 3
+    u32 = 4
+    u64 = 5
+    mask = 6
+
+extend Kind:
+    ## Bytes per lane.
+    pub func size() -> usize:
+        return match self:
+            .f64, .i64, .u64 => 8
+            .mask => 1
+            _ => 4
+
+    ## Whether the lanes are IEEE floats.
+    pub func is_float() -> bool:
+        return self == .f32 or self == .f64
+
+    ## Whether the lanes are integers (signed or unsigned).
+    pub func is_integer() -> bool:
+        return self == .i32 or self == .i64 or self == .u32 or self == .u64
+
+    ## Whether the lanes are signed integers.
+    pub func is_signed() -> bool:
+        return self == .i32 or self == .i64
+
+    ## The Base spelling: `f32`, `i64`, `mask`.
+    pub func name() -> str:
+        return match self:
+            .f32 => "f32"
+            .f64 => "f64"
+            .i32 => "i32"
+            .i64 => "i64"
+            .u32 => "u32"
+            .u64 => "u64"
+            _ => "mask"
+
+    ## This kind's bit in a `Kinds` set.
+    func bit() -> u8:
+        return (u8)1 << (u8)self
+
+## A set of kinds, one bit per `Kind`: what an operation accepts.
+type Kinds = u8
+
+let floats: Kinds = 0x03
+let integers: Kinds = 0x3C
+let signed_integers: Kinds = 0x0C
+let numbers: Kinds = 0x3F
+let any_kind: Kinds = 0x7F
+let masks: Kinds = 0x40
+
+## How many kinds there are.
+let kind_count: usize = 7
+
+## The kind numbered `value`, or none.
+func kind_of(value: u8) -> Kind?:
+    if (usize)value >= kind_count:
+        return none
+    return (Kind)value

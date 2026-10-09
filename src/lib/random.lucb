@@ -1,0 +1,31 @@
+# Hash-based random numbers: pure functions of their seed, so every element, run, thread
+# count and machine gets the same values (a per-element random is `rand(index + seed)`).
+
+## A random number in `[0, 1)` for `seed` (VEX `rand`).
+pub func rand(seed: i64) -> f32:
+    return rand_stream(seed, 0)
+
+## `rand` in f64, with 53 random bits.
+pub func rand64(seed: i64) -> f64:
+    return rand_stream64(seed, 0)
+
+## Three independent random numbers in `[0, 1)` for `seed`, lane 3 zero (VEX `rand` of a
+## vector); lane `k` is `rand_stream(seed, k)`.
+pub func rand3(seed: i64) -> f32[4]:
+    return [rand_stream(seed, 0), rand_stream(seed, 1), rand_stream(seed, 2), 0.0]
+
+## The `stream`-th independent random number in `[0, 1)` for `seed`; stream 0 is `rand`.
+pub func rand_stream(seed: i64, stream: u32) -> f32:
+    return (f32)(random_bits(seed, stream) >> 40) * (1.0 / 16777216.0)
+
+## `rand_stream` in f64.
+pub func rand_stream64(seed: i64, stream: u32) -> f64:
+    return (f64)(random_bits(seed, stream) >> 11) * (1.0 / 9007199254740992.0)
+
+## 64 random bits for `seed` and `stream`: the SplitMix64 finalizer over the seed and a
+## stream offset (VEX `random_ihash`).
+pub func random_bits(seed: i64, stream: u32) -> u64:
+    var z = (u64)seed +% (u64)stream *% 0xD1B54A32D192ED03 +% 0x9E3779B97F4A7C15
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    return z ^ (z >> 31)

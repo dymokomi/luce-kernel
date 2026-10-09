@@ -1,0 +1,209 @@
+# One worker thread's state and the loop that runs a program over one chunk of lanes.
+
+## Which lanes an instruction acts on: lanes below the worker's count whose exec byte is
+## 1, or all of them.
+struct Active:
+    let exec: const u8[]
+    let all: bool
+
+    func at(lane: usize) -> bool:
+        return self.all or self.exec[lane] != 0
+
+## A worker's register file and the chunk it is running. The file is allocated once per
+## run; register `r` starts at `offsets[r]` and holds `chunk` lanes, of which the first
+## `n` are live (fewer after a fault: lanes above the lowest failing one no longer matter).
+struct Worker:
+    var file: u8[]
+    var offsets: const usize[]
+    var exec_lanes: u8[]
+    var masked: bool
+    var counters: u64[]
+    var n: usize
+    var first: usize
+    var failed: bool
+    var fault_lane: usize
+    var fault_instruction: usize
+    var fault_kind: FaultKind
+
+    ## The lanes the current exec mask leaves active.
+    func on() -> Active:
+        return Active(exec = self.exec_lanes[..<self.n], all = not self.masked)
+
+    ## Register `register`'s live lanes as `f32`; the views below are the other kinds and
+    ## the size classes (`lanes32` is any 4-byte kind, `lanes64` any 8-byte one). An
+    ## absent register is empty.
+    func f32s(register: u16) -> f32[]:
+        if (usize)register >= self.offsets.length:
+            var empty: f32[]
+            return empty
+        return f32[]((f32*)&self.file[self.offsets[(usize)register]], self.n)
+
+    func f64s(register: u16) -> f64[]:
+        if (usize)register >= self.offsets.length:
+            var empty: f64[]
+            return empty
+        return f64[]((f64*)&self.file[self.offsets[(usize)register]], self.n)
+
+    func i32s(register: u16) -> i32[]:
+        if (usize)register >= self.offsets.length:
+            var empty: i32[]
+            return empty
+        return i32[]((i32*)&self.file[self.offsets[(usize)register]], self.n)
+
+    func i64s(register: u16) -> i64[]:
+        if (usize)register >= self.offsets.length:
+            var empty: i64[]
+            return empty
+        return i64[]((i64*)&self.file[self.offsets[(usize)register]], self.n)
+
+    func u32s(register: u16) -> u32[]:
+        if (usize)register >= self.offsets.length:
+            var empty: u32[]
+            return empty
+        return u32[]((u32*)&self.file[self.offsets[(usize)register]], self.n)
+
+    func u64s(register: u16) -> u64[]:
+        if (usize)register >= self.offsets.length:
+            var empty: u64[]
+            return empty
+        return u64[]((u64*)&self.file[self.offsets[(usize)register]], self.n)
+
+    func masks(register: u16) -> u8[]:
+        if (usize)register >= self.offsets.length:
+            var empty: u8[]
+            return empty
+        return u8[](&self.file[self.offsets[(usize)register]], self.n)
+
+    func lanes32(register: u16) -> u32[]:
+        return self.u32s(register)
+
+    func lanes64(register: u16) -> u64[]:
+        return self.u64s(register)
+
+    ## Record a fault at chunk lane `lane` of instruction `instruction`; the chunk now runs
+    ## only the lanes below it.
+    func fail(lane: usize, instruction: usize, kind: FaultKind):
+        self.failed = true
+        self.fault_lane = self.first + lane
+        self.fault_instruction = instruction
+        self.fault_kind = kind
+        self.n = lane
+
+    ## Make mask register `register` the exec mask (a copy: later writes to the register
+    ## do not change it).
+    func set_exec(register: u16):
+        let source = self.masks(register)
+        for lane in 0..<source.length:
+            self.exec_lanes[lane] = source[lane]
+        self.masked = true
+
+    ## The lowest active lane (in the exec mask and, unless absent, in `register`), or the
+    ## lane count.
+    func first_active(register: u16) -> usize:
+        let on = self.on()
+        let lanes = self.masks(register)
+        let every = register == no_register
+        for lane in 0..<self.n:
+            if on.at(lane) and (every or lanes[lane] != 0):
+                return lane
+        return self.n
+
+## Whether any live lane of a mask is set.
+func any_set(lanes: const u8[]) -> bool:
+    for value in lanes:
+        if value != 0:
+            return true
+    return false
+
+## Run the program over the worker's chunk. Faults shrink the chunk to the lanes below
+## them; it ends early when no lane is left.
+func execute(w: Worker*, shared: const Shared*):
+    let program = shared.program
+    let code = program.code.view()
+    var pc: usize = 0
+    while pc < code.length:
+        let ins = code[pc]
+        var next = pc + 1
+        var lane = w.n
+        match ins.op:
+            .copy: copy_lanes(w, ins)
+            .assign: assign_lanes(w, ins)
+            .select: select_lanes(w, ins)
+            .index: index_lanes(w, ins)
+            .add, .sub, .mul, .div, .wadd, .wsub, .wmul, .sadd, .ssub, .smul, .idiv, .rem:
+                lane = binary(w, ins)
+            .min, .max, .band, .bor, .bxor, .shl, .shr, .pow, .atan2, .fmod, .hypot:
+                lane = binary(w, ins)
+            .neg, .wneg, .abs, .bnot, .sqrt, .cbrt, .exp, .exp2, .log, .log2, .log10, .sin, .cos, .tan:
+                lane = unary(w, ins)
+            .asin, .acos, .atan, .sinh, .cosh, .tanh, .floor, .ceil, .round, .trunc, .frac, .sign:
+                lane = unary(w, ins)
+            .degrees, .radians, .isnan, .isinf, .isfinite:
+                lane = unary(w, ins)
+            .eq, .ne, .lt, .le, .gt, .ge, .mul_add, .lerp, .clamp, .smooth, .fit01:
+                lane = compare_or_ternary(w, ins)
+            .convert, .cast:
+                lane = conversion(w, ins, program.kinds.at((usize)ins.a))
+            .fit: fit_lanes(w, ins, program)
+            .dot, .cross, .length, .length2, .distance, .distance2, .normalize:
+                vector_lanes(w, ins)
+            .noise, .snoise: noise_lanes(w, ins)
+            .rand: rand_lanes(w, ins)
+            .pick: lane = pick_lanes(w, ins, program)
+            .place: lane = place_lanes(w, ins, program)
+            .store: store_lanes(w, ins, shared)
+            .call: lane = call_lanes(w, ins, program)
+            .jump: next = (usize)ins.a
+            .jump_if_true:
+                if w.masks(ins.b)[0] != 0: next = (usize)ins.a
+            .jump_if_false:
+                if w.masks(ins.b)[0] == 0: next = (usize)ins.a
+            .jump_if_any:
+                if any_set(w.masks(ins.b)): next = (usize)ins.a
+            .jump_if_none:
+                if not any_set(w.masks(ins.b)): next = (usize)ins.a
+            .exec: w.set_exec(ins.a)
+            .exec_all: w.masked = false
+            .loop_start: w.counters[(usize)ins.a] = 0
+            .loop_step:
+                w.counters[(usize)ins.a] += 1
+                if w.counters[(usize)ins.a] > shared.loop_cap:
+                    lane = w.first_active(ins.b)
+            .check: lane = first_unset(w, ins.a)
+            .trap: lane = w.first_active(no_register)
+            _: lane = w.n
+        if lane < w.n:
+            w.fail(lane, pc, fault_kind_of(w, ins, lane))
+            if w.n == 0:
+                return
+        pc = next
+
+## The lowest active lane whose mask lane is 0, or the lane count.
+func first_unset(w: Worker*, register: u16) -> usize:
+    let on = w.on()
+    let lanes = w.masks(register)
+    for lane in 0..<lanes.length:
+        if lanes[lane] == 0 and on.at(lane):
+            return lane
+    return w.n
+
+## Why `ins` faulted at `lane` (read before the chunk shrinks).
+func fault_kind_of(w: Worker*, ins: Instruction, lane: usize) -> FaultKind:
+    return match ins.op:
+        .idiv, .rem => FaultKind.division if is_zero(w, ins.b, ins.kind, lane) else FaultKind.overflow
+        .shl, .shr => FaultKind.shift
+        .convert => FaultKind.conversion
+        .pick, .place => FaultKind.bounds
+        .check => FaultKind.assertion
+        .trap => FaultKind.trap
+        .loop_step => FaultKind.loop_cap
+        .call => FaultKind.host
+        _ => FaultKind.overflow
+
+## Whether integer register `register` of `kind` is 0 at `lane`.
+func is_zero(w: Worker*, register: u16, kind: Kind, lane: usize) -> bool:
+    return match kind:
+        .i32 => w.i32s(register)[lane] == 0
+        .i64 => w.i64s(register)[lane] == 0
+        .u32 => w.u32s(register)[lane] == 0
+        _ => w.u64s(register)[lane] == 0

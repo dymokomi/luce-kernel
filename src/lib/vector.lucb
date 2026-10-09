@@ -1,0 +1,88 @@
+# Vector functions. An `f32[4]` holding a position, normal or color keeps lane 3 at zero,
+# so the four-lane forms are VEX's three-component ones.
+
+## The dot product of all four lanes.
+pub func dot(a: f32[4], b: f32[4]) -> f32:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+
+## The cross product of lanes 0 to 2; lane 3 of the result is zero.
+pub func cross(a: f32[4], b: f32[4]) -> f32[4]:
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0], 0.0]
+
+## The length.
+pub func length(a: f32[4]) -> f32:
+    return math32.sqrt(dot(a, a))
+
+## The squared length.
+pub func length2(a: f32[4]) -> f32:
+    return dot(a, a)
+
+## The distance between two points.
+pub func distance(a: f32[4], b: f32[4]) -> f32:
+    return length(a - b)
+
+## The squared distance between two points.
+pub func distance2(a: f32[4], b: f32[4]) -> f32:
+    return length2(a - b)
+
+## `a` scaled to length 1; a zero vector stays zero.
+pub func normalized(a: f32[4]) -> f32[4]:
+    let size = length(a)
+    if size == 0.0:
+        return f32[4](0.0)
+    return a * (1.0 / size)
+
+## The dot product of a two-lane vector.
+pub func dot2d(a: f32[2], b: f32[2]) -> f32:
+    return a[0] * b[0] + a[1] * b[1]
+
+## The length of a two-lane vector.
+pub func length2d(a: f32[2]) -> f32:
+    return math32.sqrt(dot2d(a, a))
+
+## The distance between two two-lane points.
+pub func distance2d(a: f32[2], b: f32[2]) -> f32:
+    return length2d(a - b)
+
+## A two-lane vector scaled to length 1; zero stays zero.
+pub func normalized2d(a: f32[2]) -> f32[2]:
+    let size = length2d(a)
+    if size == 0.0:
+        return f32[2](0.0)
+    return a * (1.0 / size)
+
+## The dot product of four f64 lanes.
+pub func dot64(a: f64[4], b: f64[4]) -> f64:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+
+## The cross product of f64 lanes 0 to 2; lane 3 of the result is zero.
+pub func cross64(a: f64[4], b: f64[4]) -> f64[4]:
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0], 0.0]
+
+## The length of an f64 vector.
+pub func length64(a: f64[4]) -> f64:
+    return math.sqrt(dot64(a, a))
+
+## The squared length of an f64 vector.
+pub func length2_64(a: f64[4]) -> f64:
+    return dot64(a, a)
+
+## The distance between two f64 points.
+pub func distance64(a: f64[4], b: f64[4]) -> f64:
+    return length64(difference64(a, b))
+
+## The squared distance between two f64 points.
+pub func distance2_64(a: f64[4], b: f64[4]) -> f64:
+    return length2_64(difference64(a, b))
+
+## An f64 vector scaled to length 1; zero stays zero.
+pub func normalized64(a: f64[4]) -> f64[4]:
+    let size = length64(a)
+    if size == 0.0:
+        return [0.0, 0.0, 0.0, 0.0]
+    let scale = 1.0 / size
+    return [a[0] * scale, a[1] * scale, a[2] * scale, a[3] * scale]
+
+# `a - b` lane by lane (`f64[4]` is an array, not a vector, so it has no `-`).
+func difference64(a: f64[4], b: f64[4]) -> f64[4]:
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]

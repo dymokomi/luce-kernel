@@ -1,0 +1,156 @@
+# The host's side of a run: named columns in and out, uniform values, and the fault a run
+# may end with. The host owns every column; the engine reads and writes them in place.
+
+## A host column: `components` values of `kind` per element, element `e`'s component `k`
+## at index `e * components + k` (a position column of `Float3` is three components). An
+## input's values are only read; an output's are written by the program's stores, on the
+## lanes active there.
+pub struct Column:
+    pub let name: str
+    pub let kind: Kind
+    pub let components: usize
+    let bytes: u8[]
+    let writable: bool
+
+    ## An input column of f32 values.
+    pub static func input_f32(name: str, values: const f32[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .f32, components = components, bytes = u8[]((u8*)values.data, values.length * 4), writable = false)
+
+    ## An input column of f64 values.
+    pub static func input_f64(name: str, values: const f64[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .f64, components = components, bytes = u8[]((u8*)values.data, values.length * 8), writable = false)
+
+    ## An input column of i32 values.
+    pub static func input_i32(name: str, values: const i32[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .i32, components = components, bytes = u8[]((u8*)values.data, values.length * 4), writable = false)
+
+    ## An input column of i64 values.
+    pub static func input_i64(name: str, values: const i64[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .i64, components = components, bytes = u8[]((u8*)values.data, values.length * 8), writable = false)
+
+    ## An input column of u32 values.
+    pub static func input_u32(name: str, values: const u32[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .u32, components = components, bytes = u8[]((u8*)values.data, values.length * 4), writable = false)
+
+    ## An input column of u64 values.
+    pub static func input_u64(name: str, values: const u64[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .u64, components = components, bytes = u8[]((u8*)values.data, values.length * 8), writable = false)
+
+    ## An input column of masks, one byte per value, 0 or 1 (other values read as set).
+    pub static func input_mask(name: str, values: const u8[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .mask, components = components, bytes = u8[]((u8*)values.data, values.length), writable = false)
+
+    ## An output column of f32 values.
+    pub static func output_f32(name: str, values: f32[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .f32, components = components, bytes = u8[]((u8*)values.data, values.length * 4), writable = true)
+
+    ## An output column of f64 values.
+    pub static func output_f64(name: str, values: f64[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .f64, components = components, bytes = u8[]((u8*)values.data, values.length * 8), writable = true)
+
+    ## An output column of i32 values.
+    pub static func output_i32(name: str, values: i32[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .i32, components = components, bytes = u8[]((u8*)values.data, values.length * 4), writable = true)
+
+    ## An output column of i64 values.
+    pub static func output_i64(name: str, values: i64[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .i64, components = components, bytes = u8[]((u8*)values.data, values.length * 8), writable = true)
+
+    ## An output column of u32 values.
+    pub static func output_u32(name: str, values: u32[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .u32, components = components, bytes = u8[]((u8*)values.data, values.length * 4), writable = true)
+
+    ## An output column of u64 values.
+    pub static func output_u64(name: str, values: u64[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .u64, components = components, bytes = u8[]((u8*)values.data, values.length * 8), writable = true)
+
+    ## An output column of masks, written as 0 or 1.
+    pub static func output_mask(name: str, values: u8[], components: usize = 1) -> Column:
+        return Column(name = name, kind = .mask, components = components, bytes = u8[]((u8*)values.data, values.length), writable = true)
+
+## A uniform's value for one run, by name.
+pub struct Uniform:
+    pub let name: str
+    pub let kind: Kind
+    pub let bits: u64
+
+    ## An f32 uniform.
+    pub static func f32(name: str, value: f32) -> Uniform:
+        return Uniform(name = name, kind = .f32, bits = (u64)value.bits())
+
+    ## An f64 uniform.
+    pub static func f64(name: str, value: f64) -> Uniform:
+        return Uniform(name = name, kind = .f64, bits = value.bits())
+
+    ## An i32 uniform.
+    pub static func i32(name: str, value: i32) -> Uniform:
+        return Uniform(name = name, kind = .i32, bits = (u64)(u32)value)
+
+    ## An i64 uniform.
+    pub static func i64(name: str, value: i64) -> Uniform:
+        return Uniform(name = name, kind = .i64, bits = (u64)value)
+
+    ## A u32 uniform.
+    pub static func u32(name: str, value: u32) -> Uniform:
+        return Uniform(name = name, kind = .u32, bits = (u64)value)
+
+    ## A u64 uniform.
+    pub static func u64(name: str, value: u64) -> Uniform:
+        return Uniform(name = name, kind = .u64, bits = value)
+
+    ## A mask (bool) uniform.
+    pub static func mask(name: str, value: bool) -> Uniform:
+        return Uniform(name = name, kind = .mask, bits = 1 if value else 0)
+
+## One run: `count` lanes, the columns and uniforms by name, and how to schedule it.
+## `threads` 0 is one per processor; `chunk` is the lanes an instruction runs over at once.
+pub struct Request:
+    pub let count: usize
+    pub let inputs: const Column[]
+    pub let outputs: const Column[]
+    pub let uniforms: const Uniform[]
+    pub let threads: usize = 0
+    pub let chunk: usize = 4096
+    pub let loop_cap: u64 = 1000000
+
+## Why a run stopped: Base's traps, as the node reports them.
+pub enum FaultKind:
+    bounds
+    overflow
+    division
+    shift
+    conversion
+    assertion
+    trap
+    loop_cap
+    host
+
+extend FaultKind:
+    ## The plain wording: "index out of bounds".
+    pub func wording() -> str:
+        return match self:
+            .bounds => "index out of bounds"
+            .overflow => "integer overflow"
+            .division => "division by zero"
+            .shift => "shift count out of range"
+            .conversion => "value does not fit the type"
+            .assertion => "assert failed"
+            .trap => "trap"
+            .loop_cap => "loop ran too many times"
+            .host => "builtin failed"
+
+## A run that stopped: the fault of the lowest failing lane, where the program came from
+## there, and the message (the `check` or `trap` text, else the kind's wording). The
+## message lives as long as the program.
+pub struct Fault:
+    pub let kind: FaultKind
+    pub let lane: usize
+    pub let instruction: usize
+    pub let line: u32
+    pub let column: u32
+    pub let message: str
+
+    ## "line 7:3: index out of bounds (element 1204)", into `buffer`; `element` names the
+    ## lanes ("point", "pixel").
+    pub func describe(buffer: u8[], element: str = "element") -> str:
+        return strings.format(buffer, f"line {self.line}:{self.column}: {self.message} ({element} {self.lane})") else ""

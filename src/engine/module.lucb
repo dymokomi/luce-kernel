@@ -1,0 +1,23 @@
+#==============================================================================================
+#
+#   engine - The column interpreter behind a Code node
+#
+#   DESCRIPTION:
+#       A program is a flat list of instructions over typed column registers: each
+#       instruction runs over a chunk of lanes (4096 by default) at once, as a tight loop
+#       over slices, the way Houdini runs VEX. `Builder` makes a program; `run` binds the
+#       host's named columns, runs the chunks on a thread pool and writes the named output
+#       columns. One lane is one element (a point, a face, a pixel): the engine knows
+#       nothing about what the lanes are.
+#
+#       Failure: a program that would trap in Base (bounds, overflow, division by zero, a
+#       failed conversion, assert, trap, a runaway loop) stops the run with a `Fault`
+#       naming the source line and column and the lowest failing lane, the same at any
+#       thread count. The engine itself never traps: every index it forms is proven by the
+#       chunk bounds and by `verify`, which every program passes before it can run.
+#
+#==============================================================================================
+import memory
+import strings
+from luce_std import collections, math, math32, parallel
+import lib
