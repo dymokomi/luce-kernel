@@ -22,13 +22,20 @@ pub enum Part:
     body
 
 ## The functions `lib` gives a snippet without an import.
-let lib_names: str[54] = [
+let lib_names: str[130] = [
     "lerp", "lerp64", "clamp", "clamp64", "fit01", "fit01_64", "fit", "fit64", "smooth", "smooth64",
     "degrees", "degrees64", "radians", "radians64", "dot", "cross", "length", "length2", "distance", "distance2",
     "normalized", "dot2d", "length2d", "distance2d", "normalized2d", "dot64", "cross64", "length64", "length2_64", "distance64",
     "distance2_64", "normalized64", "rand", "rand64", "rand3", "rand_stream", "rand_stream64", "random_bits", "snoise1", "snoise2",
     "snoise", "snoise4", "noise1", "noise2", "noise", "noise4", "snoise1_64", "snoise2_64", "snoise64", "snoise4_64",
-    "noise1_64", "noise2_64", "noise64", "noise4_64",
+    "noise1_64", "noise2_64", "noise64", "noise4_64", "abs", "abs3", "sign", "frac", "rint", "trunc",
+    "min", "max", "min3", "max3", "minv", "maxv", "avg", "sum", "product", "pow",
+    "exp", "log", "log10", "cbrt", "sinpi", "cospi", "tanpi", "Roots", "solvequadratic", "solvecubic",
+    "distance_pointline", "distance_pointsegment", "distance_pointray", "planepointdistance", "spline_constant", "spline_linear", "spline_catrom", "spline_monotone", "spline_bspline", "efit",
+    "fit10", "fit11", "invlerp", "lspline", "cspline", "spline", "kspline", "Mat3", "Mat4", "ident3",
+    "ident4", "xform_srt", "xform_str", "xform_rst", "xform_rts", "xform_tsr", "xform_trs", "xform_xyz", "xform_xzy", "xform_yxz",
+    "xform_yzx", "xform_zxy", "xform_zyx", "euler_matrix", "matrix_euler", "maketransform", "cracktransform", "lookat", "dihedral", "polardecomp",
+    "Quat", "quaternion", "quaternion_of", "qmultiply", "qrotate", "qinvert", "qconvert", "slerp", "eulertoquaternion", "quaterniontoeuler",
 ]
 
 ## A wrapped snippet: the module text and where the header and body lines are in it.
@@ -65,13 +72,17 @@ pub struct Wrapped:
 pub func wrap(run_over: RunOver, header: str, body: str) -> Wrapped!:
     var wrapped = Wrapped()
     errdefer wrapped.destroy()
-    try wrapped.put("# Generated from a Code node's text; positions map back to it.\nfrom luce_std import math, math32\nfrom luce_kernel.lib import ")
+    try wrapped.put("# Generated from a Code node's text; positions map back to it.\nfrom luce_std import math, math32\n")
+    # Only the lib names the text uses and does not declare itself: a snippet's own `sum`
+    # or `min` would otherwise shadow an import, which Base refuses.
     var first = true
     for name in lib_names:
-        if not first: try wrapped.put(", ")
+        if not uses(header, name) and not uses(body, name): continue
+        if declares(header, name) or declares(body, name): continue
+        try wrapped.put("from luce_kernel.lib import " if first else ", ")
         try wrapped.put(name)
         first = false
-    try wrapped.put("\n")
+    try wrapped.put("# no lib names\n" if first else "\n")
     try wrapped.put(run_over.imports)
     try wrapped.put("\n")
     var line: u32 = 4 + count_lines(run_over.imports)
@@ -107,6 +118,45 @@ pub func wrap(run_over: RunOver, header: str, body: str) -> Wrapped!:
     if not any_statement:
         try wrapped.put("    return\n")
     return wrapped
+
+## Whether `name` occurs in `text` as a whole word.
+func uses(text: str, name: str) -> bool:
+    var at: usize = 0
+    while let found = word_at(text, name, at):
+        _ = found
+        return true
+    return false
+
+## Whether `text` declares `name` itself: after `let`, `var`, `for`, `func` or `struct`,
+## or followed by `:` (a parameter or a typed name).
+func declares(text: str, name: str) -> bool:
+    var at: usize = 0
+    while let found = word_at(text, name, at):
+        at = found + name.length
+        var after = at
+        while after < text.length and text.bytes[after] == ' ': after += 1
+        if after < text.length and text.bytes[after] == ':': return true
+        var before = found
+        while before > 0 and text.bytes[before - 1] == ' ': before -= 1
+        for keyword in ["let", "var", "for", "func", "struct"]:
+            if before >= keyword.length and (str)text.bytes[before - keyword.length..<before] == keyword:
+                if before == keyword.length or not word_byte(text.bytes[before - keyword.length - 1]): return true
+    return false
+
+## The next whole-word occurrence of `name` in `text` at or after `from_at`, or none.
+func word_at(text: str, name: str, from_at: usize) -> usize?:
+    if name.length == 0 or text.length < name.length: return none
+    var at = from_at
+    while at + name.length <= text.length:
+        if (str)text.bytes[at..<at + name.length] == name:
+            let starts = at == 0 or not word_byte(text.bytes[at - 1])
+            let ends = at + name.length == text.length or not word_byte(text.bytes[at + name.length])
+            if starts and ends: return at
+        at += 1
+    return none
+
+func word_byte(byte: u8) -> bool:
+    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9') or byte == '_'
 
 ## How many lines `text` spans (a final newline ends the last line).
 func count_lines(text: str) -> u32:

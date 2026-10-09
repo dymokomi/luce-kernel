@@ -1,0 +1,117 @@
+# Quaternions, VEX's `vector4` rotations: imaginary part `x`, `y`, `z`, real part `w`.
+# A rotation quaternion has length 1; `qrotate(q, v)` turns `v` by it.
+
+## A quaternion; the default is the identity rotation.
+pub struct Quat:
+    pub var x: f32 = 0.0
+    pub var y: f32 = 0.0
+    pub var z: f32 = 0.0
+    pub var w: f32 = 1.0
+
+    ## The identity rotation.
+    pub static func identity() -> Quat:
+        return Quat(x = 0.0, y = 0.0, z = 0.0, w = 1.0)
+
+    ## The four parts as `[x, y, z, w]` (VEX's `vector4` layout).
+    pub func vector() -> f32[4]:
+        return [self.x, self.y, self.z, self.w]
+
+    ## Its length.
+    pub func length() -> f32:
+        return math32.sqrt(self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w)
+
+    ## Scaled to length 1; zero becomes the identity.
+    pub func normalized() -> Quat:
+        let size = self.length()
+        if size == 0.0:
+            return Quat.identity()
+        let r = 1.0 / size
+        return Quat(x = self.x * r, y = self.y * r, z = self.z * r, w = self.w * r)
+
+    ## The Hamilton product `self * other`: `other`'s rotation, then this one.
+    pub func multiply(other: Quat) -> Quat:
+        return Quat(x = self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y, y = self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x, z = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w, w = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z)
+
+    ## The inverse: the conjugate over the squared length; zero stays zero.
+    pub func inverted() -> Quat:
+        let size2 = self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
+        if size2 == 0.0:
+            return Quat(x = 0.0, y = 0.0, z = 0.0, w = 0.0)
+        let r = 1.0 / size2
+        return Quat(x = -self.x * r, y = -self.y * r, z = -self.z * r, w = self.w * r)
+
+    ## `v` (lanes 0 to 2) turned by this rotation; lane 3 of the result is zero.
+    pub func rotate(v: f32[4]) -> f32[4]:
+        let u: f32[4] = [self.x, self.y, self.z, 0.0]
+        let t = cross(u, [v[0], v[1], v[2], 0.0]) * 2.0
+        let turned = [v[0], v[1], v[2], 0.0] + t * self.w + cross(u, t)
+        return [turned[0], turned[1], turned[2], 0.0]
+
+## The rotation by `angle` radians about `axis` (VEX `quaternion(angle, axis)`).
+pub func quaternion(angle: f32, axis: f32[4]) -> Quat:
+    let k = normalized([axis[0], axis[1], axis[2], 0.0])
+    let s = math32.sin(angle * 0.5)
+    return Quat(x = k[0] * s, y = k[1] * s, z = k[2] * s, w = math32.cos(angle * 0.5))
+
+## The rotation matrix `m` as a quaternion (VEX `quaternion(matrix3)`).
+pub func quaternion_of(m: Mat3) -> Quat:
+    # Column-form entries: r(i, j) is m's row j, column i.
+    let trace = m.x[0] + m.y[1] + m.z[2]
+    if trace > 0.0:
+        let s = math32.sqrt(trace + 1.0) * 2.0
+        return Quat(x = (m.y[2] - m.z[1]) / s, y = (m.z[0] - m.x[2]) / s, z = (m.x[1] - m.y[0]) / s, w = 0.25 * s)
+    if m.x[0] > m.y[1] and m.x[0] > m.z[2]:
+        let s = math32.sqrt(1.0 + m.x[0] - m.y[1] - m.z[2]) * 2.0
+        return Quat(x = 0.25 * s, y = (m.y[0] + m.x[1]) / s, z = (m.z[0] + m.x[2]) / s, w = (m.y[2] - m.z[1]) / s)
+    if m.y[1] > m.z[2]:
+        let s = math32.sqrt(1.0 + m.y[1] - m.x[0] - m.z[2]) * 2.0
+        return Quat(x = (m.y[0] + m.x[1]) / s, y = 0.25 * s, z = (m.z[1] + m.y[2]) / s, w = (m.z[0] - m.x[2]) / s)
+    let s = math32.sqrt(1.0 + m.z[2] - m.x[0] - m.y[1]) * 2.0
+    return Quat(x = (m.z[0] + m.x[2]) / s, y = (m.z[1] + m.y[2]) / s, z = 0.25 * s, w = (m.x[1] - m.y[0]) / s)
+
+## `a * b`: `b`'s rotation, then `a`'s (VEX `qmultiply`).
+pub func qmultiply(a: Quat, b: Quat) -> Quat:
+    return a.multiply(b)
+
+## `v` turned by rotation `q` (VEX `qrotate`).
+pub func qrotate(q: Quat, v: f32[4]) -> f32[4]:
+    return q.rotate(v)
+
+## The inverse of `q` (VEX `qinvert`).
+pub func qinvert(q: Quat) -> Quat:
+    return q.inverted()
+
+## The rotation matrix of `q` (VEX `qconvert`): `m.transform(v)` is `qrotate(q, v)`.
+pub func qconvert(q: Quat) -> Mat3:
+    return Mat3(x = q.rotate([1.0, 0.0, 0.0, 0.0]), y = q.rotate([0.0, 1.0, 0.0, 0.0]), z = q.rotate([0.0, 0.0, 1.0, 0.0]))
+
+## The rotation `t` of the way from `a` to `b` along the shorter arc, at constant speed
+## (VEX `slerp`).
+pub func slerp(a: Quat, b: Quat, t: f32) -> Quat:
+    var d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+    var to = b
+    if d < 0.0:
+        d = -d
+        to = Quat(x = -b.x, y = -b.y, z = -b.z, w = -b.w)
+    var wa = 1.0 - t
+    var wb = t
+    if d < 0.9995:
+        let angle = math32.acos(d)
+        let s = 1.0 / math32.sin(angle)
+        wa = math32.sin((1.0 - t) * angle) * s
+        wb = math32.sin(t * angle) * s
+    return Quat(x = a.x * wa + to.x * wb, y = a.y * wa + to.y * wb, z = a.z * wa + to.z * wb, w = a.w * wa + to.w * wb).normalized()
+
+## The rotation by `angles` (radians about X, Y and Z) in rotation order `order`
+## (`xform_xyz` ...; VEX `eulertoquaternion`).
+pub func eulertoquaternion(angles: f32[4], order: i32) -> Quat:
+    var q = Quat.identity()
+    for step: i32 in 0..<3:
+        let axis = order_axis(order, step)
+        q = quaternion(angles[(usize)axis], unit_axis(axis)).multiply(q)
+    return q
+
+## Angles about X, Y and Z (radians) of rotation `q` in rotation order `order` (VEX
+## `quaterniontoeuler`).
+pub func quaterniontoeuler(q: Quat, order: i32) -> f32[4]:
+    return matrix_euler(qconvert(q.normalized()), order)

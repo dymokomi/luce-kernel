@@ -8,17 +8,21 @@ extend Lowerer:
         if callee.has(ast.flag_builtin):
             return try self.core_call(e, callee.text)
         if callee.has(ast.flag_type_ref) and e.resolved == none:
+            if self.record(e.type_id) != none:
+                return try self.construction(e)
             return try self.conversion(e)
         if let binding = self.call_binding(e):
             return try self.api_call(e, binding)
         let decl = e.resolved else return try self.not_available(e, "this call")
         let module = self.module_name_of(decl) else return try self.not_available(e, "this call")
         if module == "luce_kernel.lib":
-            return try self.lib_call(e, decl)
+            if has_operation(decl.text) and decl.kind == ast.Kind.func_ and self.receiver_node(e, decl) == none:
+                return try self.lib_call(e, decl)
+            return try self.inline(e, decl, true)
         if module == "luce_std.math32" or module == "luce_std.math":
             return try self.math_call(e, decl)
         if module == self.c.modules.get(self.snippet).name and decl.kind == ast.Kind.func_:
-            return try self.inline(e, decl)
+            return try self.inline(e, decl, false)
         var room: u8[200]
         let what = strings.format(room, f"`{decl.text}`") else "this function"
         return try self.not_available(e, what)
@@ -98,6 +102,48 @@ extend Lowerer:
             used += 1
             at += 1
         return try self.texts.keep_text(decoded[..<used])
+
+    ## `T(field = x, ...)` of a record struct: the given fields, the others their
+    ## defaults or zero (the checker names every argument's field).
+    func construction(e: ast.Node*) -> Value!:
+        let shape = self.record(e.type_id) else return try self.not_available(e, "this construction")
+        let decl = self.c.table.get(e.type_id).decl else return try self.not_available(e, "this construction")
+        var value = self.zero_record(shape, e.type_id)
+        var uniform = true
+        var member = decl.body
+        while let field = member:
+            member = field.next
+            if field.kind != ast.Kind.field:
+                continue
+            var source: ast.Node*? = field.left
+            var cursor = e.body
+            while let argument = cursor:
+                if argument.resolved == field or argument.text == field.text:
+                    source = argument.left
+                cursor = argument.next
+            let node = source else continue
+            let given = try self.converted(try self.expression(node), field.type_id, node)
+            let place = self.field_of(e.type_id, field.text) else return try self.fail_value(e, "internal: a field without lanes")
+            let (offset, kind, width, type_id) = place
+            _ = kind
+            _ = type_id
+            for k in 0..<width: value.lanes[offset + k] = given.lanes[k if given.width > 1 else 0]
+            uniform = uniform and given.uniform
+        value.uniform = uniform
+        return value
+
+    ## The receiver of a method call (`m` in `m.inverted()`), or none for a function, a
+    ## static method or an API call.
+    func receiver_node(e: ast.Node*, decl: ast.Node*) -> ast.Node*?:
+        if decl.has(ast.flag_static):
+            return none
+        let callee = e.left else return none
+        if callee.kind != ast.Kind.member:
+            return none
+        let owner = callee.left else return none
+        if owner.has(ast.flag_type_ref) or self.record(owner.type_id) == none:
+            return none
+        return owner
 
     ## `T(x)`: Base's checked conversion; `f32[4](x)`: every lane `x`.
     func conversion(e: ast.Node*) -> Value!:
@@ -349,11 +395,24 @@ extend Lowerer:
 
     ## A helper function of the snippet, inlined: its parameters bound to the arguments,
     ## its body lowered in place, `return` writing its result.
-    func inline(e: ast.Node*, decl: ast.Node*) -> Value!:
+    func inline(e: ast.Node*, decl: ast.Node*, from_lib: bool) -> Value!:
         if contains(self.inlining.view(), decl):
             return try self.fail_value(e, "recursion is not available in a kernel")
         var values: Value[16]
         let count = try self.arguments(e, decl, values)
+        # A method's receiver is `self` while its body is lowered.
+        var has_receiver = false
+        if let owner = self.receiver_node(e, decl):
+            try self.receivers.append(try self.expression(owner))
+            has_receiver = true
+        defer:
+            if has_receiver: self.receivers.truncate(self.receivers.length() - 1)
+        # A `lib` body reports positions and refusals at the snippet's call.
+        if from_lib:
+            if self.library_depth == 0: self.library_call = e
+            self.library_depth += 1
+        defer:
+            if from_lib: self.library_depth -= 1
         try self.inlining.append(decl)
         let locals_before = self.locals.length()
         let varying_before = self.varying_decls.length()
@@ -381,8 +440,7 @@ extend Lowerer:
         let returns = self.c.table.get(decl.type_id).elem
         var function = Function(decl = decl, live = no_register, result = self.nothing(), has_result = returns != types.unit_id)
         if function.has_result:
-            let (kind, width) = try self.shape_or_fail(e, returns)
-            function.result = self.copied(self.zero(kind, width, returns))
+            function.result = self.copied(try self.zero_value(e, returns))
             function.result.uniform = false
         if has_early_return(body.body, 0):
             function.live = self.b.register(.mask)
@@ -398,6 +456,14 @@ extend Lowerer:
         self.pinned_decls.truncate(pinned_before)
         self.inlining.truncate(self.inlining.length() - 1)
         return function.result
+
+## The `lib` functions the engine runs as column operations; every other `lib` function
+## is lowered from its Base body, like the snippet's own helpers.
+func has_operation(name: str) -> bool:
+    let names: str[47] = ["dot", "dot2d", "dot64", "length", "length2d", "length64", "length2", "length2_64", "distance", "distance2d", "distance64", "distance2", "distance2_64", "cross", "cross64", "normalized", "normalized2d", "normalized64", "lerp", "lerp64", "clamp", "clamp64", "smooth", "smooth64", "fit01", "fit01_64", "fit", "fit64", "degrees", "degrees64", "radians", "radians64", "rand", "rand64", "rand3", "rand_stream", "rand_stream64", "snoise1", "snoise2", "snoise", "snoise4", "noise1", "noise2", "noise", "noise4", "snoise1_64", "noise1_64"]
+    for known in names:
+        if known == name: return true
+    return noise_shape(name) != none
 
 ## lib's noise functions: signed or not, and dimensions.
 func noise_shape(name: str) -> (bool, usize)?:

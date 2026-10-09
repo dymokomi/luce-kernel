@@ -1,0 +1,132 @@
+# Fitting without clamps, and splines through key values (VEX `efit`, `fit10`, `fit11`,
+# `invlerp`, `lspline`, `cspline`, `kspline`, `spline`). Base has no variadic calls, so a
+# spline takes its keys as an `f32[16]` and how many of them count (1 to 16); its basis is
+# a number, the same codes luce-std's ramps use.
+
+## Each key holds until the next.
+pub let spline_constant: i32 = 0
+## Straight lines between keys.
+pub let spline_linear: i32 = 1
+## Catmull-Rom through the inner keys; the first and last only shape the ends (VEX
+## "catrom").
+pub let spline_catrom: i32 = 2
+## A cubic through every key that never overshoots between them (VEX "monotonecubic").
+pub let spline_monotone: i32 = 3
+## A uniform cubic B-spline over the keys, near but not through them (VEX "bspline").
+pub let spline_bspline: i32 = 4
+
+## `value` mapped from `old_low..old_high` onto `new_low..new_high` without clamping (VEX
+## `efit`); an empty old range gives `new_low`.
+pub func efit(value: f32, old_low: f32, old_high: f32, new_low: f32, new_high: f32) -> f32:
+    if old_low == old_high:
+        return new_low
+    return new_low + (value - old_low) / (old_high - old_low) * (new_high - new_low)
+
+## `value` clamped to `0..1` and mapped from 1 onto `new_low`, 0 onto `new_high` (VEX
+## `fit10`).
+pub func fit10(value: f32, new_low: f32, new_high: f32) -> f32:
+    return fit(value, 1.0, 0.0, new_low, new_high)
+
+## `value` clamped to `-1..1` and mapped onto `new_low..new_high` (VEX `fit11`).
+pub func fit11(value: f32, new_low: f32, new_high: f32) -> f32:
+    return fit(value, -1.0, 1.0, new_low, new_high)
+
+## Where `value` lies from `low` (0) to `high` (1), unclamped (VEX `invlerp`); an empty
+## range gives 0.
+pub func invlerp(value: f32, low: f32, high: f32) -> f32:
+    if low == high:
+        return 0.0
+    return (value - low) / (high - low)
+
+## Straight lines through the first `count` keys, spread evenly over `t` in `0..1` (VEX
+## `lspline`).
+pub func lspline(t: f32, keys: f32[16], count: i32) -> f32:
+    return spline(spline_linear, t, keys, count)
+
+## Catmull-Rom through the inner keys of the first `count`, spread evenly over `t` in
+## `0..1` (VEX `cspline`).
+pub func cspline(t: f32, keys: f32[16], count: i32) -> f32:
+    return spline(spline_catrom, t, keys, count)
+
+## The spline of `basis` over the first `count` keys at `t` (clamped to `0..1`) (VEX
+## `spline`). The interpolating bases put key `i` at `t = i / (count - 1)`; Catmull-Rom
+## and the B-spline span the inner keys. Too few keys for a cubic fall back to lines.
+pub func spline(basis: i32, t: f32, keys: f32[16], count: i32) -> f32:
+    let n = count if count < 16 else 16
+    if n < 1:
+        return 0.0
+    if n == 1:
+        return keys[0]
+    let u = math32.clamp(t, 0.0, 1.0)
+    if (basis == spline_catrom or basis == spline_bspline) and n >= 4:
+        let position = u * (f32)(n - 3)
+        let i = min_index((i32)math32.floor(position), n - 4)
+        let f = position - (f32)i
+        let p0 = keys[(usize)i]
+        let p1 = keys[(usize)(i + 1)]
+        let p2 = keys[(usize)(i + 2)]
+        let p3 = keys[(usize)(i + 3)]
+        if basis == spline_catrom:
+            return 0.5 * (2.0 * p1 + (p2 - p0) * f + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f + (3.0 * p1 - p0 - 3.0 * p2 + p3) * f * f * f)
+        let g = 1.0 - f
+        return (g * g * g * p0 + (3.0 * f * f * f - 6.0 * f * f + 4.0) * p1 + (-3.0 * f * f * f + 3.0 * f * f + 3.0 * f + 1.0) * p2 + f * f * f * p3) * (1.0 / 6.0)
+    let position = u * (f32)(n - 1)
+    let i = min_index((i32)math32.floor(position), n - 2)
+    let f = position - (f32)i
+    let a = keys[(usize)i]
+    let b = keys[(usize)(i + 1)]
+    if basis == spline_constant:
+        return b if f >= 1.0 else a
+    if basis == spline_monotone:
+        return monotone(keys, n, i, f)
+    return a + (b - a) * f
+
+func min_index(i: i32, most: i32) -> i32:
+    if i < 0: return 0
+    return i if i < most else most
+
+## Fritsch-Carlson monotone cubic between keys `i` and `i + 1` of `n` evenly spaced keys.
+func monotone(keys: f32[16], n: i32, i: i32, f: f32) -> f32:
+    let a = keys[(usize)i]
+    let b = keys[(usize)(i + 1)]
+    let slope = b - a
+    # Neighbor indices stay in range: both sides of a choice may be read.
+    let before = keys[(usize)(i - 1 if i > 0 else i)]
+    let after = keys[(usize)(i + 2 if i + 2 < n else i + 1)]
+    var m0 = slope if i == 0 else tangent(a - before, slope)
+    var m1 = slope if i + 2 >= n else tangent(slope, after - b)
+    if slope == 0.0:
+        m0 = 0.0
+        m1 = 0.0
+    let f2 = f * f
+    let f3 = f2 * f
+    return (2.0 * f3 - 3.0 * f2 + 1.0) * a + (f3 - 2.0 * f2 + f) * m0 + (-2.0 * f3 + 3.0 * f2) * b + (f3 - f2) * m1
+
+## A key's tangent from the slopes on its two sides: zero at a turn, else their harmonic
+## mean (which keeps the curve between the keys).
+func tangent(left: f32, right: f32) -> f32:
+    if left * right <= 0.0:
+        return 0.0
+    return 2.0 * left * right / (left + right)
+
+## The spline of `basis` through keys placed at `knots` (ascending; the first `count` of
+## each) at `t` (VEX `kspline`): `t` finds its place between the knots of the keys the
+## curve spans (the inner ones for Catmull-Rom and the B-spline), which then reads the
+## evenly spaced spline there.
+pub func kspline(basis: i32, t: f32, keys: f32[16], knots: f32[16], count: i32) -> f32:
+    let n = count if count < 16 else 16
+    if n < 2:
+        return keys[0] if n == 1 else 0.0
+    let inner = (basis == spline_catrom or basis == spline_bspline) and n >= 4
+    let first: i32 = 1 if inner else 0
+    let last = n - 2 if inner else n - 1
+    var place: f32 = 0.0
+    if t >= knots[(usize)last]:
+        place = 1.0
+    elif t > knots[(usize)first]:
+        for i: i32 in first..<last:
+            let low = knots[(usize)i]
+            let high = knots[(usize)(i + 1)]
+            if t >= low and t < high:
+                place = ((f32)(i - first) + (t - low) / (high - low)) / (f32)(last - first)
+    return spline(basis, place, keys, n)

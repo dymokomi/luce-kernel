@@ -80,6 +80,12 @@ struct Lowerer:
     var loops: collections.List[Loop]
     var functions: collections.List[Function]
     var inlining: collections.List[ast.Node*]
+    ## The receivers of the methods being inlined (`self` is the last).
+    var receivers: collections.List[Value]
+    ## How deep the walk is in `lib` bodies, and the snippet's call that entered them:
+    ## positions and refusals there point at that call.
+    var library_depth: usize
+    var library_call: ast.Node*?
     var varying_decls: collections.List[ast.Node*]
     var pinned_decls: collections.List[ast.Node*]
     var texts: collections.TextPool
@@ -101,6 +107,7 @@ struct Lowerer:
         self.loops.destroy()
         self.functions.destroy()
         self.inlining.destroy()
+        self.receivers.destroy()
         self.varying_decls.destroy()
         self.pinned_decls.destroy()
         self.texts.destroy()
@@ -110,12 +117,19 @@ struct Lowerer:
     ## Stop with `message` at `node`.
     func fail(node: ast.Node*, message: str) -> !:
         if not self.failed:
+            let at = self.snippet_node(node)
             self.failed = true
-            self.failure_offset = node.start
-            self.failure_module = self.module_of(node)
+            self.failure_offset = at.start
+            self.failure_module = self.module_of(at)
             self.failure = self.texts.keep_text(message.bytes) catch failure:
                 recover "out of memory"
         error(refused, message)
+
+    ## `node`, or inside a `lib` body the snippet's call that entered it.
+    func snippet_node(node: ast.Node*) -> ast.Node*:
+        if self.library_depth > 0:
+            if let call = self.library_call: return call
+        return node
 
     func fail_value(node: ast.Node*, message: str) -> Value!:
         try self.fail(node, message)
@@ -204,6 +218,14 @@ struct Lowerer:
             value.kinds[k] = shape.kinds[k]
             value.lanes[k] = self.b.constant(shape.kinds[k], 0)
         return value
+
+    ## The zero of `type_id`: a scalar's, a vector's or a record's; a refusal at `node`
+    ## for any other type.
+    func zero_value(node: ast.Node*, type_id: u32) -> Value!:
+        if let shape = self.record(type_id):
+            return self.zero_record(shape, type_id)
+        let (kind, width) = try self.shape_or_fail(node, type_id)
+        return self.zero(kind, width, type_id)
 
     ## The shape of `type_id`, or a refusal at `node`.
     func shape_or_fail(node: ast.Node*, type_id: u32) -> (Kind, usize)!:

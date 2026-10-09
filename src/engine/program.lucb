@@ -114,6 +114,30 @@ pub struct Program:
                 return self.scalars.at((usize)preset.scalar)
         return none
 
+    ## How many builtin call sites the program has.
+    pub func call_count() -> usize:
+        return self.sites.length()
+
+    ## The name of the builtin call site `at` calls ("" past the last site).
+    pub func call_name(at: usize) -> str:
+        if at >= self.sites.length(): return ""
+        return self.sites.at(at).builtin.name
+
+    ## Literal text argument `index` of call site `at` ("" when it has none).
+    pub func call_text(at: usize, index: usize) -> str:
+        if at >= self.sites.length(): return ""
+        let site = self.sites.view()[at]
+        if index >= site.text_count: return ""
+        return site.texts[index]
+
+    ## Where call site `at` is in the snippet's module (its first call instruction), or
+    ## none: a host reports problems with a call's arguments there.
+    pub func call_source(at: usize) -> Source?:
+        for (index, instruction) in self.code.view().indexed():
+            if instruction.op == .call and (usize)instruction.dst == at:
+                return self.source(index)
+        return none
+
     ## Whether some call of the builtin named `name` may pass `value` as its argument
     ## lane `argument`: the lane is that constant, or anything not constant. A host uses
     ## it to prepare before a run what such calls need (`k.input(1).nearpoints` needs

@@ -1,0 +1,175 @@
+# Building and taking apart transforms, VEX style: transform and rotation orders, Euler
+# angles, `maketransform` / `cracktransform`, `lookat`, `dihedral` and `polardecomp`.
+
+## Transform orders (VEX's `XFORM_SRT` ...): which of scale, rotate and translate apply
+## first. `xform_srt` scales, then rotates, then translates (VEX's default).
+pub let xform_srt: i32 = 0
+## Scale, translate, rotate.
+pub let xform_str: i32 = 1
+## Rotate, scale, translate.
+pub let xform_rst: i32 = 2
+## Rotate, translate, scale.
+pub let xform_rts: i32 = 3
+## Translate, scale, rotate.
+pub let xform_tsr: i32 = 4
+## Translate, rotate, scale.
+pub let xform_trs: i32 = 5
+
+## Rotation orders (VEX's `XFORM_XYZ` ...): the axis rotated about first, second and
+## third. `xform_xyz` rotates about X, then Y, then Z (VEX's default).
+pub let xform_xyz: i32 = 0
+## X, then Z, then Y.
+pub let xform_xzy: i32 = 1
+## Y, then X, then Z.
+pub let xform_yxz: i32 = 2
+## Y, then Z, then X.
+pub let xform_yzx: i32 = 3
+## Z, then X, then Y.
+pub let xform_zxy: i32 = 4
+## Z, then Y, then X.
+pub let xform_zyx: i32 = 5
+
+## The axis rotation order `order` turns about at step `step` (0 first, 2 last).
+func order_axis(order: i32, step: i32) -> i32:
+    let firsts: i32[6] = [0, 0, 1, 1, 2, 2]
+    let seconds: i32[6] = [1, 2, 0, 2, 0, 1]
+    let o = (usize)(order if order >= 0 and order <= 5 else 0)
+    if step == 0: return firsts[o]
+    if step == 1: return seconds[o]
+    return 3 - firsts[o] - seconds[o]
+
+## Unit axis `axis` (0, 1 or 2).
+func unit_axis(axis: i32) -> f32[4]:
+    if axis == 0: return [1.0, 0.0, 0.0, 0.0]
+    if axis == 1: return [0.0, 1.0, 0.0, 0.0]
+    return [0.0, 0.0, 1.0, 0.0]
+
+## The rotation turning by `angles[0]`, `angles[1]` and `angles[2]` radians about X, Y
+## and Z, in rotation order `order`.
+pub func euler_matrix(angles: f32[4], order: i32) -> Mat3:
+    var m = Mat3.identity()
+    for step: i32 in 0..<3:
+        let axis = order_axis(order, step)
+        m = m.rotate(angles[(usize)axis], unit_axis(axis))
+    return m
+
+## Angles about X, Y and Z (radians) that `euler_matrix` turns into rotation `m` for
+## rotation order `order`; the middle axis's angle is within ±π/2.
+pub func matrix_euler(m: Mat3, order: i32) -> f32[4]:
+    # In column form the rotation is R(third) R(second) R(first): Euler angles about
+    # (third, second, first), the classic Tait-Bryan extraction.
+    let a0 = order_axis(order, 2)
+    let a1 = order_axis(order, 1)
+    let odd = (a0 + 1) % 3 != a1
+    let i = a0
+    let j = (a0 + 2) % 3 if odd else (a0 + 1) % 3
+    let k = (a0 + 1) % 3 if odd else (a0 + 2) % 3
+    # Column-form entry (r, c) is the row-form entry (c, r).
+    var r0 = math32.atan2(m.at(k, j), m.at(k, k))
+    let c2 = math32.hypot(m.at(i, i), m.at(j, i))
+    var r1 = math32.atan2(-m.at(k, i), c2)
+    let s1 = math32.sin(r0)
+    let c1 = math32.cos(r0)
+    var r2 = math32.atan2(s1 * m.at(i, k) - c1 * m.at(i, j), c1 * m.at(j, j) - s1 * m.at(j, k))
+    if not odd:
+        r0 = -r0
+        r1 = -r1
+        r2 = -r2
+    var angles = f32[4](0.0)
+    angles[(usize)a0] = r0
+    angles[(usize)a1] = r1
+    angles[(usize)order_axis(order, 0)] = r2
+    return angles
+
+## The transform scaling by `s`, rotating by `r` (degrees about X, Y and Z, in rotation
+## order `xyz`) and translating by `t`, in transform order `trs`, about pivot `pivot`
+## (VEX `maketransform(trs, xyz, t, r, s, p)`).
+pub func maketransform(trs: i32, xyz: i32, t: f32[4], r: f32[4], s: f32[4], pivot: f32[4] = [0.0, 0.0, 0.0, 0.0]) -> Mat4:
+    let rotate = Mat4.of(euler_matrix(r * (math32.pi / 180.0), xyz), f32[4](0.0))
+    let scale = Mat4.scaling(s)
+    let move = Mat4.translation(t)
+    var m = Mat4.identity()
+    if trs == xform_str: m = scale.multiply(move).multiply(rotate)
+    elif trs == xform_rst: m = rotate.multiply(scale).multiply(move)
+    elif trs == xform_rts: m = rotate.multiply(move).multiply(scale)
+    elif trs == xform_tsr: m = move.multiply(scale).multiply(rotate)
+    elif trs == xform_trs: m = move.multiply(rotate).multiply(scale)
+    else: m = scale.multiply(rotate).multiply(move)
+    if pivot[0] == 0.0 and pivot[1] == 0.0 and pivot[2] == 0.0:
+        return m
+    return Mat4.translation(pivot * -1.0).multiply(m).multiply(Mat4.translation(pivot))
+
+## One part of `m` as `maketransform(trs, xyz, ...)` with pivot `pivot` would build it:
+## `c` 0 the translation, 1 the rotation (degrees about X, Y and Z), 2 the scale (VEX
+## `cracktransform(trs, xyz, c, p, m)`). Shear is not taken apart: a sheared matrix
+## gives the nearest rotation and the axes' lengths.
+pub func cracktransform(trs: i32, xyz: i32, c: i32, pivot: f32[4], m: Mat4) -> f32[4]:
+    let whole = Mat4.translation(pivot).multiply(m).multiply(Mat4.translation(pivot * -1.0))
+    let linear = whole.mat3()
+    # Scale before rotation scales the rows; rotation before scale, the columns.
+    let rows_scaled = trs == xform_srt or trs == xform_str or trs == xform_tsr
+    var scale = f32[4](0.0)
+    var turn = Mat3.identity()
+    if rows_scaled:
+        scale = [length(linear.x), length(linear.y), length(linear.z), 0.0]
+        turn = Mat3(x = linear.x * (1.0 / nonzero(scale[0])), y = linear.y * (1.0 / nonzero(scale[1])), z = linear.z * (1.0 / nonzero(scale[2])))
+    else:
+        let columns = linear.transposed()
+        scale = [length(columns.x), length(columns.y), length(columns.z), 0.0]
+        turn = Mat3(x = columns.x * (1.0 / nonzero(scale[0])), y = columns.y * (1.0 / nonzero(scale[1])), z = columns.z * (1.0 / nonzero(scale[2]))).transposed()
+    if turn.determinant() < 0.0:
+        # A mirror: one negative scale keeps the rest a rotation.
+        scale[0] = -scale[0]
+        turn = Mat3.scaling([-1.0, 1.0, 1.0, 0.0]).multiply(turn) if rows_scaled else turn.multiply(Mat3.scaling([-1.0, 1.0, 1.0, 0.0]))
+    if c == 1:
+        return matrix_euler(turn, xyz) * (180.0 / math32.pi)
+    if c == 2:
+        return scale
+    # The translation row went through whatever applies after the translation.
+    let moved = whole.translation_part()
+    if trs == xform_srt or trs == xform_rst:
+        return moved
+    if trs == xform_str:
+        return turn.transposed().transform(moved)
+    if trs == xform_rts:
+        return [moved[0] / nonzero(scale[0]), moved[1] / nonzero(scale[1]), moved[2] / nonzero(scale[2]), 0.0]
+    return linear.inverted().transform(moved)
+
+func nonzero(x: f32) -> f32:
+    return x if x != 0.0 else 1.0
+
+## The rotation that turns the negative Z axis toward `to - from`, keeping the Y axis as
+## close to `up` as it can (VEX `lookat`). `up` along the direction falls back to Z or Y.
+pub func lookat(from_point: f32[4], to: f32[4], up: f32[4] = [0.0, 1.0, 0.0, 0.0]) -> Mat3:
+    let back = normalized([from_point[0] - to[0], from_point[1] - to[1], from_point[2] - to[2], 0.0])
+    if length2(back) == 0.0:
+        return Mat3.identity()
+    var side = cross(up, back)
+    if length2(side) < 1.0e-12:
+        side = cross([0.0, 0.0, 1.0, 0.0] if math32.abs(back[1]) > 0.9 else [0.0, 1.0, 0.0, 0.0], back)
+    let x = normalized(side)
+    return Mat3(x = x, y = cross(back, x), z = back)
+
+## The shortest rotation taking direction `a` onto direction `b` (VEX `dihedral`).
+pub func dihedral(a: f32[4], b: f32[4]) -> Mat3:
+    let u = normalized([a[0], a[1], a[2], 0.0])
+    let v = normalized([b[0], b[1], b[2], 0.0])
+    let axis = cross(u, v)
+    let sine = length(axis)
+    let cosine = dot(u, v)
+    if sine < 1.0e-7:
+        if cosine > 0.0:
+            return Mat3.identity()
+        # Opposite directions: half a turn about any axis across them.
+        let across = cross(u, [0.0, 0.0, 1.0, 0.0] if math32.abs(u[0]) > 0.9 else [1.0, 0.0, 0.0, 0.0])
+        return Mat3.rotation(math32.pi, across)
+    return Mat3.rotation(math32.atan2(sine, cosine), axis)
+
+## The rotation part of `m`'s polar decomposition `m = R S`, `R` orthonormal (VEX
+## `polardecomp`): averaging with the inverse transpose until it settles.
+pub func polardecomp(m: Mat3) -> Mat3:
+    var r = m
+    for _ in 0..<12:
+        let other = r.inverted().transposed()
+        r = Mat3(x = (r.x + other.x) * 0.5, y = (r.y + other.y) * 0.5, z = (r.z + other.z) * 0.5)
+    return r

@@ -4,3 +4,8 @@ vector.lucb
 random.lucb
 noise.lucb
 perlin.lucb
+arithmetic.lucb
+spline.lucb
+matrix.lucb
+transform.lucb
+quaternion.lucb

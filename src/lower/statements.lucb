@@ -69,7 +69,7 @@ extend Lowerer:
                 let at = self.find_local(decl) else return try self.fail(place, "this name cannot be assigned in a kernel")
                 self.write_local(at, value)
             .member:
-                let binding = self.binding_of(place.left, place.text) else return try self.fail(place, "this member cannot be assigned in a kernel")
+                let binding = self.binding_of(place.left, place.text) else return try self.store_field(place, value)
                 if binding.role != .field:
                     return try self.fail(place, "this member cannot be assigned")
                 try self.write_column(place, binding.column, value, every_lane)
@@ -82,6 +82,23 @@ extend Lowerer:
                 try self.store_indexed(owner, index, value)
             _:
                 try self.fail(place, "this place cannot be assigned in a kernel")
+
+    ## Write `value` into a field of a record local (`m.x = row`).
+    func store_field(place: ast.Node*, value: Value) -> !:
+        let owner = place.left else return
+        let found = self.field_of(owner.type_id, place.text) else return try self.fail(place, "this member cannot be assigned in a kernel")
+        if owner.kind != ast.Kind.name:
+            return try self.fail(place, "only a field of a local can be assigned in a kernel")
+        let decl = owner.resolved else return
+        let at = self.find_local(decl) else return try self.fail(owner, "this name cannot be assigned in a kernel")
+        let (offset, kind, width, type_id) = found
+        _ = kind
+        _ = type_id
+        for k in 0..<width:
+            var lane = value
+            lane.width = 1
+            lane.lanes[0] = value.lanes[k if value.width > 1 else 0]
+            self.write_local(at, lane, offset + k)
 
     ## Write `value` into lane `lane` of the local or column `owner` names.
     func store_lane(owner: ast.Node*, value: Value, lane: usize) -> !:

@@ -6,7 +6,7 @@ extend Lowerer:
     ## Instructions from here on came from `node`'s line and column of the snippet module.
     func position(node: ast.Node*):
         let m = self.c.modules.get(self.snippet)
-        let (file, line, column) = m.src.located(node.start)
+        let (file, line, column) = m.src.located(self.snippet_node(node).start)
         _ = file
         self.b.at(line, column)
 
@@ -26,6 +26,9 @@ extend Lowerer:
             .group:
                 let inner = e.left else return try self.fail_value(e, "an empty group")
                 return try self.expression(inner)
+            .self_:
+                if self.receivers.length() == 0: return try self.fail_value(e, "`self` outside a method")
+                return self.receivers.at(self.receivers.length() - 1)
             .formatted: return try self.not_available(e, "formatted text")
             _: return try self.fail_value(e, "this expression is not available in a kernel")
 
@@ -353,8 +356,7 @@ extend Lowerer:
             for k in 0..<yes.width:
                 result.lanes[k] = self.b.select(decision.lanes[0], yes.lanes[k], no.lanes[k])
             return result
-        let (kind, width) = try self.shape_or_fail(e, e.type_id)
-        let held = self.copied(self.zero(kind, width, e.type_id))
+        let held = self.copied(try self.zero_value(e, e.type_id))
         try self.side(decision.lanes[0], then_node, held, e.type_id)
         try self.side(self.b.unary(.bnot, decision.lanes[0]), else_node, held, e.type_id)
         var result = held

@@ -12,7 +12,7 @@ import common
 ## The test host's API stubs, as luce-geocore's `code` module will look.
 let stubs: str = "## Test API.\npub struct Point:\n    pub var P: f32[4]\n    pub var N: f32[4]\n    pub var Cd: f32[4]\n    pub let ptnum: i32\n    pub let numpt: i32\n\n    pub func f32(name: str) -> f32:\n        _ = name\n        return 0.0\n\n    pub func set_f32(name: str, value: f32):\n        _ = name\n        _ = value\n\n    pub func vec3(name: str) -> f32[4]:\n        _ = name\n        return f32[4](0.0)\n\n    pub func area() -> f32:\n        return 0.0\n\npub struct Hit:\n    pub let prim: i32\n    pub let uv: f32[2]\n    pub let position: f32[4]\n    pub let distance: f32\n\npub struct Source:\n    var unused: i32\n\n    pub func count() -> i32:\n        return 0\n\n    pub func value(i: i32, name: str) -> f32:\n        _ = i\n        _ = name\n        return 0.0\n\n    pub func probe(at: f32[4]) -> Hit:\n        _ = at\n        return Hit(prim = 0, uv = [0.0, 0.0], position = [0.0, 0.0, 0.0, 0.0], distance = 0.0)\n\npub struct Kernel:\n    pub let time: f64\n\n    pub func input(index: i64) -> const Source*:\n        _ = index\n        return (const Source*)(void*)0x1000\n\n    pub func f32(name: str, default: f32 = 0.0) -> f32:\n        _ = name\n        return default\n\n    pub func i32(name: str, default: i32 = 0) -> i32:\n        _ = name\n        return default\n"
 
-let points: usize = 64
+pub let points: usize = 64
 
 pub let run_over_points: RunOver = RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = "from host.code import Point, Kernel")
 
@@ -78,15 +78,15 @@ pub func make_root(room: u8[]) -> str!:
     return root
 
 ## Points with positions, normals and a mass column; the outputs start as copies.
-struct Columns:
-    var positions: f32[]
-    var normals: f32[]
-    var masses: f32[]
-    var moved: f32[]
-    var colors: f32[]
-    var weighed: f32[]
+pub struct Columns:
+    pub var positions: f32[]
+    pub var normals: f32[]
+    pub var masses: f32[]
+    pub var moved: f32[]
+    pub var colors: f32[]
+    pub var weighed: f32[]
 
-    static func make() -> Columns!:
+    pub static func make() -> Columns!:
         var made = Columns(positions = try new f32[points * 3] in memory.heap, normals = try new f32[points * 3] in memory.heap,
                            masses = try new f32[points] in memory.heap, moved = try new f32[points * 3] in memory.heap,
                            colors = try new f32[points * 3] in memory.heap, weighed = try new f32[points] in memory.heap)
@@ -98,7 +98,7 @@ struct Columns:
             made.masses[at] = (f32)at * 0.5
         return made
 
-    func release():
+    pub func release():
         free(self.positions) in memory.heap
         free(self.normals) in memory.heap
         free(self.masses) in memory.heap
@@ -107,7 +107,7 @@ struct Columns:
         free(self.weighed) in memory.heap
 
     ## Run `compiled` at every worker count; the outputs of the last run stay.
-    func run(compiled: const Compiled*, uniforms: const Uniform[]) -> engine.Fault?!:
+    pub func run(compiled: const Compiled*, uniforms: const Uniform[]) -> engine.Fault?!:
         var found: engine.Fault? = none
         for threads in common.thread_counts:
             memory.copy(self.moved, self.positions, self.positions.length)
@@ -259,6 +259,21 @@ pub func run_all() -> !:
         else:
             same("early return", columns.colors[at * 3], 0.0, at)
     print(f"ok    lowering match, labeled break, early return, lazy and: {constructs.program.instructions().length} instructions")
+
+    # Structs of the snippet: construction, a function returning one (with an early
+    # return under a varying condition), a method, a static function and a field write.
+    let pair_header = "struct Pair:\n    var a: f32\n    var b: f32 = 2.0\n    func sum() -> f32:\n        return self.a + self.b\n    static func twice(x: f32) -> Pair:\n        return Pair(a = x, b = x * 2.0)\nfunc pick(x: f32) -> Pair:\n    if x > 0.5:\n        return Pair(a = 1.0, b = x)\n    return Pair(a = 0.0, b = -x)\n"
+    var structs = try compiled_or_trap(root, &host, pair_header, "var q = Pair(a = p.P[0])\nlet t = Pair.twice(p.P[1])\nlet r = pick(p.P[0])\nif p.ptnum % 2 == 0:\n    q.b = 3.0\np.Cd = [q.sum(), t.b + r.a, r.b, 0.0]\n")
+    defer structs.destroy()
+    assert(try columns.run(&structs, common.no_uniforms()) == none)
+    for at in 0..<points:
+        let x = columns.positions[at * 3]
+        let y = columns.positions[at * 3 + 1]
+        let b: f32 = 3.0 if at % 2 == 0 else 2.0
+        same("a method over a constructed struct", columns.colors[at * 3], x + b, at)
+        same("a static function and a returned struct", columns.colors[at * 3 + 1], y * 2.0 + (1.0 if x > 0.5 else 0.0), at)
+        same("an early return of a struct", columns.colors[at * 3 + 2], x if x > 0.5 else -x, at)
+    print("ok    lowering structs: construction, methods, static functions, field writes")
 
     var branchy = try compiled_or_trap(root, &host, no_header, "if p.ptnum % 2 == 0:\n    p.set_f32(\"mass\", -1.0)\n")
     defer branchy.destroy()

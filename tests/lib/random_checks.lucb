@@ -15,13 +15,13 @@ test "rand is in [0, 1), deterministic and seed dependent":
 
 test "rand spreads evenly over ten buckets":
     var buckets: usize[10]
-    var sum: f64 = 0.0
+    var total: f64 = 0.0
     let count: i64 = 200000
     for seed: i64 in 0..<count:
         let value = rand(seed)
-        sum += (f64)value
+        total += (f64)value
         buckets[(usize)(value * 10.0)] += 1
-    let mean = sum / (f64)count
+    let mean = total / (f64)count
     assert(mean > 0.495 and mean < 0.505)
     for filled in buckets:
         assert(filled > 19000 and filled < 21000)

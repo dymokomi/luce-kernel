@@ -1,0 +1,225 @@
+## Stage 6's library: matrices, quaternions, transforms, arithmetic and splines. First the
+## Base functions themselves against VEX's documented values and round trips; then
+## snippets using them, lowered and run, against the same functions called directly.
+from luce_std import math32
+from luce_kernel import lib, lower
+from luce_kernel.lib import Mat3, Mat4, Quat
+from luce_kernel.lower import Host
+import common
+import lowering
+
+func near(what: str, got: f32, want: f32, tolerance: f32 = 0.00001):
+    if not (math32.abs(got - want) <= tolerance * math32.max(1.0, math32.abs(want))):
+        print(f"FAIL  library {what}: {got}, wanted {want}")
+        trap("library")
+
+func near3(what: str, got: f32[4], want: f32[4], tolerance: f32 = 0.00001):
+    for k: usize in 0..<3:
+        near(what, got[k], want[k], tolerance)
+
+func near_matrix(what: str, got: Mat3, want: Mat3, tolerance: f32 = 0.00001):
+    near3(what, got.x, want.x, tolerance)
+    near3(what, got.y, want.y, tolerance)
+    near3(what, got.z, want.z, tolerance)
+
+pub func run_all() -> !:
+    arithmetic()
+    splines()
+    matrices()
+    transforms()
+    quaternions()
+    try lowered()
+
+func arithmetic():
+    near("rint(2.5)", lib.rint(2.5), 2.0)
+    near("rint(3.5)", lib.rint(3.5), 4.0)
+    near("rint(-2.5)", lib.rint(-2.5), -2.0)
+    near("rint(1.4)", lib.rint(1.4), 1.0)
+    near("frac(-0.25)", lib.frac(-0.25), 0.75)
+    near("trunc(-1.7)", lib.trunc(-1.7), -1.0)
+    near("sign", lib.sign(-3.0) + lib.sign(0.0) * 10.0 + lib.sign(2.0) * 100.0, 99.0)
+    near("avg", lib.avg([1.0, 2.0, 6.0, 9.0]), 3.0)
+    near("product", lib.product([2.0, 3.0, 4.0, 9.0]), 24.0)
+    near("minv and maxv", lib.minv([3.0, -1.0, 2.0, -9.0]) + lib.maxv([3.0, -1.0, 2.0, 9.0]), 2.0)
+    if lib.sinpi(1.0) != 0.0 or lib.sinpi(0.5) != 1.0 or lib.cospi(0.5) != 0.0 or lib.cospi(3.0) != -1.0:
+        trap("library: the half-turn forms are exact at whole and half turns")
+    near("sinpi(1/6)", lib.sinpi(1.0 / 6.0), 0.5)
+    let two = lib.solvequadratic(1.0, -3.0, 2.0)
+    assert(two.count == 2)
+    near("quadratic roots", two.roots[0] * 10.0 + two.roots[1], 12.0)
+    assert(lib.solvequadratic(1.0, 0.0, 1.0).count == 0)
+    let three = lib.solvecubic(1.0, -6.0, 11.0, -6.0)
+    assert(three.count == 3)
+    near3("cubic roots", three.roots, [1.0, 2.0, 3.0, 0.0], 0.0001)
+    let one = lib.solvecubic(1.0, 0.0, 0.0, -8.0)
+    assert(one.count == 1)
+    near("cube root of 8", one.roots[0], 2.0)
+    let repeated = lib.solvecubic(1.0, -4.0, 5.0, -2.0)
+    assert(repeated.count == 2)
+    near("double root", repeated.roots[0] * 10.0 + repeated.roots[1], 12.0, 0.0001)
+    let p: f32[4] = [2.0, 3.0, 0.0, 0.0]
+    near("point to line", lib.distance_pointline(p, [0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]), 3.0)
+    near("point to segment", lib.distance_pointsegment(p, [-1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]), math32.sqrt(13.0))
+    near("point to ray", lib.distance_pointray([-2.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]), 2.0)
+    near("point to plane", lib.planepointdistance([0.0, 1.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0], [5.0, -2.0, 1.0, 0.0]), 3.0)
+    print("ok    library arithmetic: rint, frac, sign, reductions, half turns, roots, distances")
+
+func splines():
+    near("efit", lib.efit(0.5, 0.0, 1.0, 10.0, 20.0), 15.0)
+    near("efit past the range", lib.efit(2.0, 0.0, 1.0, 10.0, 20.0), 30.0)
+    near("fit10", lib.fit10(0.25, 0.0, 1.0), 0.75)
+    near("fit11", lib.fit11(0.0, 0.0, 10.0), 5.0)
+    near("invlerp", lib.invlerp(5.0, 0.0, 10.0), 0.5)
+    var keys: f32[16]
+    keys[0] = 0.0
+    keys[1] = 10.0
+    keys[2] = 20.0
+    keys[3] = 0.0
+    near("lspline at a key", lib.lspline(0.5, keys, 3), 10.0)
+    near("lspline between", lib.lspline(0.25, keys, 3), 5.0)
+    near("constant", lib.spline(lib.spline_constant, 0.4, keys, 3), 0.0)
+    near("constant, next key", lib.spline(lib.spline_constant, 0.6, keys, 3), 10.0)
+    # Catmull-Rom passes through the inner keys and keeps their slope (VEX catrom).
+    near("cspline at its start", lib.cspline(0.0, keys, 4), 10.0)
+    near("cspline at its end", lib.cspline(1.0, keys, 4), 20.0)
+    near("cspline midway", lib.cspline(0.5, keys, 4), 16.875)
+    near("B-spline at its start", lib.spline(lib.spline_bspline, 0.0, keys, 4), (0.0 + 4.0 * 10.0 + 20.0) / 6.0)
+    # Monotone: through every key, never past them.
+    for step in 0..<41:
+        let value = lib.spline(lib.spline_monotone, (f32)step / 40.0, keys, 4)
+        if value < -0.000001 or value > 20.000001: trap("library: the monotone spline overshoots")
+    near("monotone at a key", lib.spline(lib.spline_monotone, 2.0 / 3.0, keys, 4), 20.0)
+    var knots: f32[16]
+    knots[1] = 0.1
+    knots[2] = 1.0
+    near("kspline linear", lib.kspline(lib.spline_linear, 0.55, keys, knots, 3), 15.0)
+    print("ok    library interpolation: efit, fit10, fit11, invlerp, lspline, cspline, kspline, spline")
+
+func matrices():
+    let quarter = Mat3.rotation(math32.pi * 0.5, [0.0, 0.0, 1.0, 0.0])
+    near3("rotating X a quarter about Z", quarter.transform([1.0, 0.0, 0.0, 0.0]), [0.0, 1.0, 0.0, 0.0])
+    let m = Mat3.rotation(0.7, [1.0, 2.0, 3.0, 0.0]).scale([2.0, 3.0, 0.5, 0.0])
+    near("a 3×3 determinant", m.determinant(), 3.0)
+    near_matrix("a 3×3 inverse", m.multiply(m.inverted()), Mat3.identity())
+    near_matrix("a transposed transpose", m.transposed().transposed(), m)
+    near_matrix("rotate after", Mat3.identity().rotate(0.3, [0.0, 1.0, 0.0, 0.0]).rotate(0.4, [0.0, 1.0, 0.0, 0.0]), Mat3.rotation(0.7, [0.0, 1.0, 0.0, 0.0]))
+    near3("prerotate applies first", Mat3.scaling([2.0, 1.0, 1.0, 0.0]).prerotate(math32.pi * 0.5, [0.0, 0.0, 1.0, 0.0]).transform([0.0, -1.0, 0.0, 0.0]), [2.0, 0.0, 0.0, 0.0])
+    let singular = Mat3(x = [1.0, 2.0, 3.0, 0.0], y = [2.0, 4.0, 6.0, 0.0], z = [0.0, 0.0, 1.0, 0.0])
+    near3("a singular inverse is zero", singular.inverted().x, f32[4](0.0))
+    let t = Mat4.identity().rotate(0.4, [0.0, 1.0, 1.0, 0.0]).scale([1.0, 2.0, 3.0, 0.0]).translate([1.0, -2.0, 5.0, 0.0])
+    near("a 4×4 determinant", t.determinant(), 6.0, 0.0001)
+    let back = t.multiply(t.inverted())
+    near3("a 4×4 inverse x", back.x, [1.0, 0.0, 0.0, 0.0], 0.0001)
+    near3("a 4×4 inverse w", back.w, [0.0, 0.0, 0.0, 0.0], 0.0001)
+    near3("translate moves points", Mat4.translation([1.0, 2.0, 3.0, 0.0]).transform_point([1.0, 1.0, 1.0, 0.0]), [2.0, 3.0, 4.0, 0.0])
+    near3("not vectors", Mat4.translation([1.0, 2.0, 3.0, 0.0]).transform_vector([1.0, 1.0, 1.0, 0.0]), [1.0, 1.0, 1.0, 0.0])
+    print("ok    library matrices: rotation, determinant, inverse, multiply, transform, pre and post forms")
+
+func transforms():
+    # maketransform then cracktransform gives the parts back, for every order of both kinds.
+    let t: f32[4] = [1.5, -2.0, 0.25, 0.0]
+    let r: f32[4] = [30.0, -50.0, 70.0, 0.0]
+    let s: f32[4] = [2.0, 0.5, 1.25, 0.0]
+    let pivot: f32[4] = [0.5, 1.0, -1.0, 0.0]
+    for trs: i32 in 0..<6:
+        for xyz: i32 in 0..<6:
+            let m = lib.maketransform(trs, xyz, t, r, s, pivot)
+            near3("cracked translation", lib.cracktransform(trs, xyz, 0, pivot, m), t, 0.0001)
+            near3("cracked rotation", lib.cracktransform(trs, xyz, 1, pivot, m), r, 0.001)
+            near3("cracked scale", lib.cracktransform(trs, xyz, 2, pivot, m), s, 0.0001)
+    # VEX's default order: scale, rotate, translate, X then Y then Z.
+    let plain = lib.maketransform(lib.xform_srt, lib.xform_xyz, [0.0, 0.0, 5.0, 0.0], [0.0, 90.0, 0.0, 0.0], [2.0, 2.0, 2.0, 0.0])
+    near3("a point through the default order", plain.transform_point([1.0, 0.0, 0.0, 0.0]), [0.0, 0.0, 3.0, 0.0], 0.0001)
+    # Angles within ±π/2 come back as they were (past that, an equal rotation does).
+    for order: i32 in 0..<6:
+        let angles: f32[4] = [0.4, -1.1, 1.2, 0.0]
+        near3("Euler angles back", lib.matrix_euler(lib.euler_matrix(angles, order), order), angles, 0.0001)
+    near_matrix("looking down -Z changes nothing", lib.lookat([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, -5.0, 0.0]), Mat3.identity())
+    near3("-Z looks at the target", lib.lookat([1.0, 1.0, 1.0, 0.0], [4.0, 1.0, 1.0, 0.0]).transform([0.0, 0.0, -1.0, 0.0]), [1.0, 0.0, 0.0, 0.0])
+    near3("dihedral takes a onto b", lib.dihedral([2.0, 0.0, 0.0, 0.0], [0.0, 0.0, 3.0, 0.0]).transform([1.0, 0.0, 0.0, 0.0]), [0.0, 0.0, 1.0, 0.0])
+    near3("dihedral of opposite directions", lib.dihedral([1.0, 0.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0]).transform([1.0, 0.0, 0.0, 0.0]), [-1.0, 0.0, 0.0, 0.0])
+    let turn = Mat3.rotation(0.9, [1.0, -1.0, 2.0, 0.0])
+    near_matrix("the rotation of a polar decomposition", lib.polardecomp(Mat3.scaling([2.0, 3.0, 4.0, 0.0]).multiply(turn)), turn, 0.0001)
+    print("ok    library transforms: maketransform and cracktransform in all 36 orders, Euler angles, lookat, dihedral, polardecomp")
+
+func quaternions():
+    let q = lib.quaternion(math32.pi * 0.5, [0.0, 0.0, 1.0, 0.0])
+    near3("qrotate a quarter about Z", lib.qrotate(q, [1.0, 0.0, 0.0, 0.0]), [0.0, 1.0, 0.0, 0.0])
+    near("a quarter turn's w", q.w, math32.sqrt(0.5))
+    let a = lib.quaternion(0.8, [1.0, 2.0, -1.0, 0.0])
+    let b = lib.quaternion(-1.3, [0.0, 1.0, 3.0, 0.0])
+    let v: f32[4] = [0.3, -2.0, 1.0, 0.0]
+    near3("qmultiply turns by b, then a", lib.qrotate(lib.qmultiply(a, b), v), lib.qrotate(a, lib.qrotate(b, v)))
+    near3("qinvert undoes", lib.qrotate(lib.qinvert(a), lib.qrotate(a, v)), v)
+    near_matrix("qconvert is the rotation matrix", lib.qconvert(a), Mat3.rotation(0.8, [1.0, 2.0, -1.0, 0.0]))
+    let back = lib.quaternion_of(lib.qconvert(b))
+    near3("a matrix back to a quaternion", lib.qrotate(back, v), lib.qrotate(b, v))
+    let half = lib.slerp(Quat.identity(), q, 0.5)
+    near3("slerp halfway", lib.qrotate(half, [1.0, 0.0, 0.0, 0.0]), [math32.sqrt(0.5), math32.sqrt(0.5), 0.0, 0.0])
+    for order: i32 in 0..<6:
+        let angles: f32[4] = [-0.6, 0.9, 1.3, 0.0]
+        let turned = lib.eulertoquaternion(angles, order)
+        near_matrix("eulertoquaternion matches euler_matrix", lib.qconvert(turned), lib.euler_matrix(angles, order))
+        near3("quaterniontoeuler back", lib.quaterniontoeuler(turned, order), angles, 0.0001)
+    print("ok    library quaternions: quaternion, qmultiply, qrotate, qinvert, qconvert, slerp, Euler orders")
+
+## Snippets over the library, lowered and run, against the functions called directly.
+let cases: str[6] = [
+    "let m = Mat3.rotation(p.P[0], [0.3, 1.0, 0.2, 0.0]).scale([1.0, 2.0, 0.5, 0.0])\np.Cd = m.inverted().transform(p.P)\n",
+    "let q = eulertoquaternion(p.P * 0.7, xform_yzx)\np.Cd = quaterniontoeuler(q, xform_yzx)\n",
+    "let m = maketransform(xform_trs, xform_zxy, p.P, p.P * 40.0, [1.0, 2.0, 0.5, 0.0], [0.1, 0.2, 0.3, 0.0])\np.Cd = cracktransform(xform_trs, xform_zxy, 1, [0.1, 0.2, 0.3, 0.0], m)\n",
+    "let r = solvecubic(1.0, -p.P[0], -1.0, p.P[1])\np.Cd = [(f32)r.count, r.roots[0], r.roots[r.count - 1], 0.0]\n",
+    "var keys: f32[16]\nfor i in 0..<6:\n    keys[i] = math32.sin((f32)i + p.P[0])\np.Cd = [spline(spline_catrom, p.P[1], keys, 6), spline(spline_monotone, p.P[1] * 0.9, keys, 6), lspline(p.P[2], keys, 6), 0.0]\n",
+    "let q = slerp(quaternion(p.P[0], [0.0, 1.0, 0.0, 0.0]), quaternion_of(lookat(p.P, [0.0, 0.0, 0.0, 0.0])), p.P[1])\np.Cd = qrotate(q, polardecomp(dihedral(p.P, [1.0, 1.0, 0.0, 0.0])).transform([rint(p.P[0] * 4.0), frac(-p.P[2]), sinpi(p.P[0]), 0.0]))\n",
+]
+
+func expected(case: usize, p: f32[4]) -> f32[4]:
+    match case:
+        0:
+            let m = Mat3.rotation(p[0], [0.3, 1.0, 0.2, 0.0]).scale([1.0, 2.0, 0.5, 0.0])
+            return m.inverted().transform(p)
+        1:
+            return lib.quaterniontoeuler(lib.eulertoquaternion(p * 0.7, lib.xform_yzx), lib.xform_yzx)
+        2:
+            let m = lib.maketransform(lib.xform_trs, lib.xform_zxy, p, p * 40.0, [1.0, 2.0, 0.5, 0.0], [0.1, 0.2, 0.3, 0.0])
+            return lib.cracktransform(lib.xform_trs, lib.xform_zxy, 1, [0.1, 0.2, 0.3, 0.0], m)
+        3:
+            let r = lib.solvecubic(1.0, -p[0], -1.0, p[1])
+            return [(f32)r.count, r.roots[0], r.roots[(usize)(r.count - 1)], 0.0]
+        4:
+            var keys: f32[16]
+            for i in 0..<6:
+                keys[i] = math32.sin((f32)i + p[0])
+            return [lib.spline(lib.spline_catrom, p[1], keys, 6), lib.spline(lib.spline_monotone, p[1] * 0.9, keys, 6), lib.lspline(p[2], keys, 6), 0.0]
+        _:
+            let q = lib.slerp(lib.quaternion(p[0], [0.0, 1.0, 0.0, 0.0]), lib.quaternion_of(lib.lookat(p, [0.0, 0.0, 0.0, 0.0])), p[1])
+            return lib.qrotate(q, lib.polardecomp(lib.dihedral(p, [1.0, 1.0, 0.0, 0.0])).transform([lib.rint(p[0] * 4.0), lib.frac(-p[2]), lib.sinpi(p[0]), 0.0]))
+
+func lowered() -> !:
+    var room: u8[1024]
+    let root = try lowering.make_root(room)
+    var host = try lowering.make_host()
+    defer host.destroy()
+    var columns = try lowering.Columns.make()
+    defer columns.release()
+    for (case, body) in cases.indexed():
+        var compiled = try lowering.compiled_or_trap(root, &host, "", body)
+        defer compiled.destroy()
+        assert(try columns.run(&compiled, common.no_uniforms()) == none)
+        for at in 0..<lowering.points:
+            let p: f32[4] = [columns.positions[at * 3], columns.positions[at * 3 + 1], columns.positions[at * 3 + 2], 0.0]
+            let want = expected(case, p)
+            for k: usize in 0..<3:
+                if not (math32.abs(columns.colors[at * 3 + k] - want[k]) <= 0.0001 * math32.max(1.0, math32.abs(want[k]))):
+                    print(f"FAIL  library lowered case {case} point {at} lane {k}: {columns.colors[at * 3 + k]}, wanted {want[k]}")
+                    trap("library lowered")
+        print(f"ok    library lowered case {case}: {compiled.program.instructions().length} instructions")
+    # A snippet's own `sum` and `min` stay its own: only lib names it uses unclaimed
+    # are imported.
+    var own = try lowering.compiled_or_trap(root, &host, "", "var sum: f32 = avg(p.P)\nlet min = 2.0\np.Cd = [sum + (f32)min, 0.0, 0.0, 0.0]\n")
+    defer own.destroy()
+    assert(try columns.run(&own, common.no_uniforms()) == none)
+    for at in 0..<lowering.points:
+        let p: f32[4] = [columns.positions[at * 3], columns.positions[at * 3 + 1], columns.positions[at * 3 + 2], 0.0]
+        near("a snippet's own sum beside lib's avg", columns.colors[at * 3], lib.avg(p) + 2.0)
+    print("ok    library names a snippet declares stay the snippet's")

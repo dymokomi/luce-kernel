@@ -1,0 +1,214 @@
+# VEX's arithmetic: rounding and sign, component reductions of vectors, powers and logs,
+# the half-turn trigonometry, polynomial roots and point distances. Vector forms work on
+# lanes 0 to 2 of an `f32[4]`.
+
+## `|x|` (VEX `abs`).
+pub func abs(x: f32) -> f32:
+    return math32.abs(x)
+
+## Each lane's `|x|` (VEX `abs` of a vector); lane 3 is zero.
+pub func abs3(v: f32[4]) -> f32[4]:
+    return [math32.abs(v[0]), math32.abs(v[1]), math32.abs(v[2]), 0.0]
+
+## -1, 0 or 1 by the sign of `x` (VEX `sign`); NaN gives 0.
+pub func sign(x: f32) -> f32:
+    if x > 0.0: return 1.0
+    if x < 0.0: return -1.0
+    return 0.0
+
+## The fractional part, `x - floor(x)`, in `0..1` (VEX `frac`).
+pub func frac(x: f32) -> f32:
+    return x - math32.floor(x)
+
+## `x` rounded to the nearest whole number, halves to the even one (VEX `rint`).
+pub func rint(x: f32) -> f32:
+    let r = math32.floor(x + 0.5)
+    if r - x == 0.5 and math32.floor(r * 0.5) * 2.0 != r:
+        return r - 1.0
+    return r
+
+## `x` with its fraction dropped, toward zero (VEX `trunc`).
+pub func trunc(x: f32) -> f32:
+    return math32.trunc(x)
+
+## The smaller of `a` and `b` (VEX `min`).
+pub func min(a: f32, b: f32) -> f32:
+    return a if a < b else b
+
+## The larger of `a` and `b` (VEX `max`).
+pub func max(a: f32, b: f32) -> f32:
+    return a if a > b else b
+
+## Lane-by-lane `min` of lanes 0 to 2; lane 3 is zero.
+pub func min3(a: f32[4], b: f32[4]) -> f32[4]:
+    return [min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]), 0.0]
+
+## Lane-by-lane `max` of lanes 0 to 2; lane 3 is zero.
+pub func max3(a: f32[4], b: f32[4]) -> f32[4]:
+    return [max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]), 0.0]
+
+## The smallest of lanes 0 to 2 (VEX `min(vector)`).
+pub func minv(v: f32[4]) -> f32:
+    return min(v[0], min(v[1], v[2]))
+
+## The largest of lanes 0 to 2 (VEX `max(vector)`).
+pub func maxv(v: f32[4]) -> f32:
+    return max(v[0], max(v[1], v[2]))
+
+## The mean of lanes 0 to 2 (VEX `avg(vector)`).
+pub func avg(v: f32[4]) -> f32:
+    return (v[0] + v[1] + v[2]) * (1.0 / 3.0)
+
+## The sum of lanes 0 to 2 (VEX `sum(vector)`).
+pub func sum(v: f32[4]) -> f32:
+    return v[0] + v[1] + v[2]
+
+## The product of lanes 0 to 2 (VEX `product(vector)`).
+pub func product(v: f32[4]) -> f32:
+    return v[0] * v[1] * v[2]
+
+## `a` to the power `b` (VEX `pow`).
+pub func pow(a: f32, b: f32) -> f32:
+    return math32.pow(a, b)
+
+## e to the power `x` (VEX `exp`).
+pub func exp(x: f32) -> f32:
+    return math32.exp(x)
+
+## The natural logarithm (VEX `log`).
+pub func log(x: f32) -> f32:
+    return math32.log(x)
+
+## The base-10 logarithm (VEX `log10`).
+pub func log10(x: f32) -> f32:
+    return math32.log10(x)
+
+## The cube root, negative for negative `x` (VEX `cbrt`).
+pub func cbrt(x: f32) -> f32:
+    return math32.cbrt(x)
+
+## `x` half turns reduced to `-1..1`, so whole and half turns stay exact.
+func half_turns(x: f32) -> f32:
+    return x - 2.0 * math32.floor(x * 0.5 + 0.5)
+
+## `sin(π x)`, exactly 0 at whole `x` and ±1 at halves.
+pub func sinpi(x: f32) -> f32:
+    let r = half_turns(x)
+    if r == 0.0 or r == 1.0 or r == -1.0: return 0.0
+    if r == 0.5: return 1.0
+    if r == -0.5: return -1.0
+    return math32.sin(math32.pi * r)
+
+## `cos(π x)`, exactly ±1 at whole `x` and 0 at halves.
+pub func cospi(x: f32) -> f32:
+    let r = half_turns(x)
+    if r == 0.5 or r == -0.5: return 0.0
+    if r == 0.0: return 1.0
+    if r == 1.0 or r == -1.0: return -1.0
+    return math32.cos(math32.pi * r)
+
+## `tan(π x)`: exactly 0 at whole `x`.
+pub func tanpi(x: f32) -> f32:
+    return sinpi(x) / cospi(x)
+
+## A polynomial's real roots: `count` of them in `roots`, ascending.
+pub struct Roots:
+    pub var count: i32 = 0
+    pub var roots: f32[4] = [0.0, 0.0, 0.0, 0.0]
+
+## The real roots of `a x² + b x + c` (VEX `solvequadratic`); `a` zero solves the line,
+## and a polynomial that is zero everywhere has no roots listed.
+pub func solvequadratic(a: f32, b: f32, c: f32) -> Roots:
+    let a64 = (f64)a
+    let b64 = (f64)b
+    let c64 = (f64)c
+    if a64 == 0.0:
+        if b64 == 0.0:
+            return Roots()
+        return Roots(count = 1, roots = [(f32)(-c64 / b64), 0.0, 0.0, 0.0])
+    let disc = b64 * b64 - 4.0 * a64 * c64
+    if disc < 0.0:
+        return Roots()
+    if disc == 0.0:
+        return Roots(count = 1, roots = [(f32)(-b64 / (2.0 * a64)), 0.0, 0.0, 0.0])
+    # The stable pair: no cancellation between -b and the root of the discriminant.
+    let q = -0.5 * (b64 + (math.sqrt(disc) if b64 >= 0.0 else -math.sqrt(disc)))
+    let r1 = q / a64
+    let r2 = c64 / q
+    let low = r1 if r1 < r2 else r2
+    let high = r2 if r1 < r2 else r1
+    return Roots(count = 2, roots = [(f32)low, (f32)high, 0.0, 0.0])
+
+## The real roots of `a x³ + b x² + c x + d` (VEX `solvecubic`), each repeated root once;
+## `a` zero solves the quadratic.
+pub func solvecubic(a: f32, b: f32, c: f32, d: f32) -> Roots:
+    if a == 0.0:
+        return solvequadratic(b, c, d)
+    let p2 = (f64)b / (f64)a
+    let p1 = (f64)c / (f64)a
+    let p0 = (f64)d / (f64)a
+    # The depressed cubic t³ + p t + q with x = t - p2 / 3.
+    let shift = p2 / 3.0
+    let p = p1 - p2 * p2 / 3.0
+    let q = 2.0 * p2 * p2 * p2 / 27.0 - p2 * p1 / 3.0 + p0
+    let disc = q * q / 4.0 + p * p * p / 27.0
+    if math.abs(disc) < 1.0e-12 * (1.0 + q * q):
+        if math.abs(p) < 1.0e-12:
+            return Roots(count = 1, roots = [(f32)(-shift), 0.0, 0.0, 0.0])
+        # A double root and a single one.
+        let single = 3.0 * q / p
+        let twice = -1.5 * q / p
+        let low = (single if single < twice else twice) - shift
+        let high = (twice if single < twice else single) - shift
+        return Roots(count = 2, roots = [(f32)low, (f32)high, 0.0, 0.0])
+    if disc > 0.0:
+        let s = math.sqrt(disc)
+        let t = math.cbrt(-q / 2.0 + s) + math.cbrt(-q / 2.0 - s)
+        return Roots(count = 1, roots = [(f32)(t - shift), 0.0, 0.0, 0.0])
+    # Three real roots: the trigonometric form, ascending.
+    let m = 2.0 * math.sqrt(-p / 3.0)
+    let angle = math.acos(math.clamp(3.0 * q / (p * m), -1.0, 1.0)) / 3.0
+    let r0 = m * math.cos(angle) - shift
+    let r1 = m * math.cos(angle - 2.0 * math.pi / 3.0) - shift
+    let r2 = m * math.cos(angle - 4.0 * math.pi / 3.0) - shift
+    let low = math.min(r0, math.min(r1, r2))
+    let high = math.max(r0, math.max(r1, r2))
+    let middle = r0 + r1 + r2 - low - high
+    return Roots(count = 3, roots = [(f32)low, (f32)middle, (f32)high, 0.0])
+
+## The distance from `point` to the infinite line through `origin` along `direction`
+## (VEX `distance_pointline`); a zero direction measures to `origin`.
+pub func distance_pointline(point: f32[4], origin: f32[4], direction: f32[4]) -> f32:
+    let d = [direction[0], direction[1], direction[2], 0.0]
+    let to = [point[0] - origin[0], point[1] - origin[1], point[2] - origin[2], 0.0]
+    let size2 = dot(d, d)
+    if size2 == 0.0:
+        return length(to)
+    return length(to - d * (dot(to, d) / size2))
+
+## The distance from `point` to the segment from `a` to `b` (VEX `distance_pointsegment`).
+pub func distance_pointsegment(point: f32[4], a: f32[4], b: f32[4]) -> f32:
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2], 0.0]
+    let to = [point[0] - a[0], point[1] - a[1], point[2] - a[2], 0.0]
+    let size2 = dot(d, d)
+    if size2 == 0.0:
+        return length(to)
+    let t = math32.clamp(dot(to, d) / size2, 0.0, 1.0)
+    return length(to - d * t)
+
+## The distance from `point` to the ray from `origin` along `direction` (VEX
+## `distance_pointray`).
+pub func distance_pointray(point: f32[4], origin: f32[4], direction: f32[4]) -> f32:
+    let d = [direction[0], direction[1], direction[2], 0.0]
+    let to = [point[0] - origin[0], point[1] - origin[1], point[2] - origin[2], 0.0]
+    let size2 = dot(d, d)
+    if size2 == 0.0:
+        return length(to)
+    let t = math32.max(dot(to, d) / size2, 0.0)
+    return length(to - d * t)
+
+## The distance from `point` to the plane through `origin` with normal `normal` (any
+## length but zero; VEX `planepointdistance`), never negative.
+pub func planepointdistance(origin: f32[4], normal: f32[4], point: f32[4]) -> f32:
+    let n = normalized([normal[0], normal[1], normal[2], 0.0])
+    return math32.abs(dot([point[0] - origin[0], point[1] - origin[1], point[2] - origin[2], 0.0], n))

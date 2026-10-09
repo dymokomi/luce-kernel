@@ -38,6 +38,12 @@ extend Lowerer:
             while let d = cursor:
                 if d == decl:
                     return m.name
+                if d.kind == ast.Kind.struct_:
+                    # A method or static function of the module's struct.
+                    var member = d.body
+                    while let inner = member:
+                        if inner == decl: return m.name
+                        member = inner.next
                 cursor = d.next
         return none
 
@@ -66,7 +72,14 @@ extend Lowerer:
                     if binding.role != .builtin:
                         return true
                     return true
-                return self.varies_list(node.body)
+                # A method's receiver is an argument too.
+                var receiver = false
+                if let callee = node.left:
+                    if callee.kind == ast.Kind.member: receiver = self.varies(callee.left)
+                return receiver or self.varies_list(node.body)
+            .self_:
+                if self.receivers.length() == 0: return false
+                return not self.receivers.at(self.receivers.length() - 1).uniform
             .argument:
                 return self.varies(node.left)
             _:
@@ -228,7 +241,8 @@ extend Lowerer:
                         if constant >= 0 and constant < 32: which = (usize)constant
                 try self.scan_place(node.left, varying or self.varies(node.body), depth, which)
             .member:
-                let binding = self.binding_of(node.left, node.text) else return
+                # A field of a record local: some lanes of the local.
+                let binding = self.binding_of(node.left, node.text) else return try self.scan_place(node.left, varying, depth, some_lane)
                 if binding.role != .field:
                     return
                 let at = try self.column_use(node, binding.column, binding.components, node.type_id)

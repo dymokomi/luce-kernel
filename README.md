@@ -23,7 +23,17 @@ Three public modules:
 - `luce_kernel.lib`: the functions a snippet calls without importing them, in Base
   spelling: `dot cross length length2 distance distance2 normalized`, `lerp clamp fit
   fit01 smooth degrees radians`, `rand rand3 rand64`, Perlin `noise`/`snoise` in 1 to 4
-  dimensions (`noise1 noise2 noise noise4`), each with f64 forms (`64` suffix).
+  dimensions (`noise1 noise2 noise noise4`), each with f64 forms (`64` suffix). VEX's
+  math and transforms in VEX's row-vector convention: `Mat3`/`Mat4` (identity, rotation,
+  transposed, inverted, determinant, multiply, transform, rotate/prerotate/scale/
+  prescale/translate/pretranslate), `Quat` with `quaternion qmultiply qrotate qinvert
+  qconvert slerp eulertoquaternion quaterniontoeuler`, `maketransform cracktransform
+  lookat dihedral polardecomp` with the `xform_*` orders, `abs sign frac rint trunc min
+  max avg sum product pow exp log log10 cbrt sinpi cospi tanpi`, `solvequadratic
+  solvecubic`, the point distances, and `efit fit10 fit11 invlerp lspline cspline kspline
+  spline`. The engine runs the first group as column operations; the rest lower from their
+  Base bodies like a snippet's own helpers (structs, methods and all). A snippet imports
+  only the lib names it uses and does not declare itself.
 
 - `luce_kernel.lower`: from the user's snippet text to a program. `wrap` puts the body in
   the Run Over entry function (`point(p: Point*, k: const Kernel*)`, given by the host),

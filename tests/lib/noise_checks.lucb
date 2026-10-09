@@ -16,7 +16,7 @@ test "snoise is zero on the lattice":
 test "snoise spans -1..1 in every dimension and width":
     var low: f64[8]
     var high: f64[8]
-    var sum: f64 = 0.0
+    var total: f64 = 0.0
     let samples: i64 = 40000
     for step: i64 in 0..<samples:
         let x = walk(step, 0)
@@ -32,10 +32,10 @@ test "snoise spans -1..1 in every dimension and width":
             assert(value >= -1.0 and value <= 1.0)
             if value < low[at]: low[at] = value
             if value > high[at]: high[at] = value
-        sum += (f64)noise([(f32)x, (f32)y, (f32)z, 0.0])
+        total += (f64)noise([(f32)x, (f32)y, (f32)z, 0.0])
     for at in 0..<8:
         assert(low[at] < -0.5 and high[at] > 0.5)
-    let mean = sum / (f64)samples
+    let mean = total / (f64)samples
     assert(mean > 0.47 and mean < 0.53)
 
 test "noise is in 0..1 and f32 follows f64":
