@@ -378,6 +378,9 @@ pub struct Builder:
         self.append(.jump_if_any, .mask, 0, (u16)label.id, mask, 0, "")
 
     ## Jump to `label` when no live lane of `mask` is set (skip a branch nobody takes).
+    ## The skipped code must leave the exec mask as it found it (end a branch with `exec`
+    ## of the enclosing mask, never `exec_all` inside another branch), so skipping it
+    ## changes nothing.
     pub func jump_if_none(mask: u16, label: Label):
         self.append(.jump_if_none, .mask, 0, (u16)label.id, mask, 0, "")
 

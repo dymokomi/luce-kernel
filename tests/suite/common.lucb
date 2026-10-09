@@ -17,7 +17,7 @@ pub func no_uniforms() -> const Uniform[]:
 
 ## SplitMix64: a small seeded generator for the fuzzer and the sample data.
 pub struct Generator:
-    var state: u64
+    pub var state: u64
 
     pub func next() -> u64:
         self.state = self.state +% 0x9E3779B97F4A7C15

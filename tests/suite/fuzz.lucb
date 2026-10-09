@@ -1,0 +1,391 @@
+## The fuzzer: random valid programs (arithmetic in every kind, masked regions, skipped
+## branches, uniform branches, masked loops, checks and traps) over columns full of
+## extreme values. The engine must never trap (the process would die), and every run must
+## give the same fault or the same output bits at any worker count and chunk size. Then
+## random raw instructions: `finish` may refuse them, and whatever it accepts must run.
+import memory
+from luce_std import math, math32
+from luce_kernel import engine
+from luce_kernel.engine import Builder, Column, Request, Uniform, Program, Kind, Op, Fault
+import common
+
+let lanes: usize = 600
+let programs: usize = 400
+let raw_programs: usize = 20000
+let kinds: Kind[7] = [.f32, .f64, .i32, .i64, .u32, .u64, .mask]
+
+## The operations the generator draws from, by how they are built.
+let binary_ops: Op[23] = [.add, .sub, .mul, .div, .wadd, .wsub, .wmul, .sadd, .ssub, .smul, .idiv, .rem, .min, .max, .band, .bor, .bxor, .shl, .shr, .pow, .atan2, .fmod, .hypot]
+let unary_ops: Op[28] = [.neg, .wneg, .abs, .bnot, .sqrt, .cbrt, .exp, .exp2, .log, .log2, .log10, .sin, .cos, .tan, .asin, .acos, .atan, .sinh, .cosh, .tanh, .floor, .ceil, .round, .trunc, .frac, .sign, .degrees, .radians]
+let compare_ops: Op[6] = [.eq, .ne, .lt, .le, .gt, .ge]
+let ternary_ops: Op[5] = [.mul_add, .lerp, .clamp, .smooth, .fit01]
+
+## Host columns, one per kind, full of awkward values.
+struct Data:
+    var f32s: f32[]
+    var f64s: f64[]
+    var i32s: i32[]
+    var i64s: i64[]
+    var u32s: u32[]
+    var u64s: u64[]
+    var masks: u8[]
+
+    static func make(random: common.Generator*, tame: bool) -> Data!:
+        var data = Data(f32s = try new f32[lanes] in memory.heap, f64s = try new f64[lanes] in memory.heap,
+                        i32s = try new i32[lanes] in memory.heap, i64s = try new i64[lanes] in memory.heap,
+                        u32s = try new u32[lanes] in memory.heap, u64s = try new u64[lanes] in memory.heap,
+                        masks = try new u8[lanes] in memory.heap)
+        let floats: f64[10] = [0.0, -0.0, 1.5, -2.75, 1.0e30, -1.0e30, math.infinity, math.nan, 3.0e9, 1.0e-40]
+        let signed: i64[8] = [0, 1, -1, 9223372036854775807, -9223372036854775807 - 1, 7, 1000, -3]
+        for at in 0..<lanes:
+            let small = (i64)random.below(19) - 9
+            let wild = not tame and random.chance(6)
+            let real = floats[random.below(10)] if wild else (f64)small * 0.37
+            data.f32s[at] = (f32)real
+            data.f64s[at] = real
+            let whole = signed[random.below(8)] if wild else small
+            data.i32s[at] = (i32)whole
+            data.i64s[at] = whole
+            data.u32s[at] = (u32)whole
+            data.u64s[at] = (u64)whole
+            data.masks[at] = (u8)random.below(2)
+        return data
+
+    func release():
+        free(self.f32s) in memory.heap
+        free(self.f64s) in memory.heap
+        free(self.i32s) in memory.heap
+        free(self.i64s) in memory.heap
+        free(self.u32s) in memory.heap
+        free(self.u64s) in memory.heap
+        free(self.masks) in memory.heap
+
+    func inputs() -> Column[7]:
+        return [Column.input_f32("f32", self.f32s), Column.input_f64("f64", self.f64s), Column.input_i32("i32", self.i32s),
+                Column.input_i64("i64", self.i64s), Column.input_u32("u32", self.u32s), Column.input_u64("u64", self.u64s),
+                Column.input_mask("mask", self.masks)]
+
+    func outputs() -> Column[7]:
+        return [Column.output_f32("f32", self.f32s), Column.output_f64("f64", self.f64s), Column.output_i32("i32", self.i32s),
+                Column.output_i64("i64", self.i64s), Column.output_u32("u32", self.u32s), Column.output_u64("u64", self.u64s),
+                Column.output_mask("mask", self.masks)]
+
+    func clear():
+        zero(self.f32s)
+        zero(self.f64s)
+        zero(self.i32s)
+        zero(self.i64s)
+        zero(self.u32s)
+        zero(self.u64s)
+        zero(self.masks)
+
+    func same(other: const Data*) -> bool:
+        for at in 0..<lanes:
+            if self.f32s[at].bits() != other.f32s[at].bits() or self.f64s[at].bits() != other.f64s[at].bits():
+                return false
+            if self.i32s[at] != other.i32s[at] or self.i64s[at] != other.i64s[at] or self.masks[at] != other.masks[at]:
+                return false
+            if self.u32s[at] != other.u32s[at] or self.u64s[at] != other.u64s[at]:
+                return false
+        return true
+
+func zero[T](values: T[]):
+    memory.set(u8[]((u8*)values.data, values.length * memory.size_of(T)), 0)
+
+## The registers written so far, by kind, that every later instruction may read.
+struct Pool:
+    var registers: u16[7][96]
+    var counts: usize[7]
+
+    func add(register: u16, kind: Kind):
+        let k = (usize)(u8)kind
+        if self.counts[k] < 96:
+            self.registers[k][self.counts[k]] = register
+            self.counts[k] += 1
+
+    func any(random: common.Generator*, kind: Kind) -> u16:
+        let k = (usize)(u8)kind
+        return self.registers[k][random.below(self.counts[k])]
+
+## One random program's builder state.
+struct Maker:
+    var b: Builder
+    var pool: Pool
+    var random: common.Generator
+    var depth: usize
+    ## The exec mask in force (`no_register`: every lane).
+    var current: u16 = 0xFFFF
+
+    func kind_for(op: Op) -> Kind?:
+        let start = self.random.below(7)
+        for step: usize in 0..<7:
+            let kind = kinds[(start + step) % 7]
+            if op.accepts(kind):
+                return kind
+        return none
+
+    func operand(kind: Kind) -> u16:
+        if self.random.chance(5):
+            return self.constant(kind)
+        return self.pool.any(&self.random, kind)
+
+    func constant(kind: Kind) -> u16:
+        let pick = (i64)self.random.below(9) - 4
+        return match kind:
+            .f32 => self.b.constant_f32((f32)pick * 0.5)
+            .f64 => self.b.constant_f64((f64)pick * 0.5)
+            .i32 => self.b.constant_i32((i32)pick)
+            .i64 => self.b.constant_i64(pick)
+            .u32 => self.b.constant_u32((u32)(pick + 4))
+            .u64 => self.b.constant_u64((u64)(pick + 4))
+            _ => self.b.constant_mask(pick > 0)
+
+    ## One random value instruction, its result added to the pool.
+    func value():
+        match self.random.below(12):
+            0, 1, 2:
+                let op = binary_ops[self.random.below(23)]
+                let kind = self.kind_for(op) else return
+                var right = self.operand(kind)
+                # Mostly keep divisors nonzero and shift counts in range, so most programs
+                # run to the end; now and then let them fault.
+                if not self.random.chance(8):
+                    if op == .idiv or op == .rem: right = self.b.binary(.bor, right, self.b.constant(kind, 1))
+                    if op == .shl or op == .shr: right = self.b.binary(.band, right, self.b.constant(kind, 7))
+                self.pool.add(self.b.binary(op, self.operand(kind), right), kind)
+            3, 4:
+                let op = unary_ops[self.random.below(28)]
+                let kind = self.kind_for(op) else return
+                self.pool.add(self.b.unary(op, self.operand(kind)), kind)
+            5:
+                let op = compare_ops[self.random.below(6)]
+                let kind = self.kind_for(op) else return
+                self.pool.add(self.b.compare(op, self.operand(kind), self.operand(kind)), .mask)
+            6:
+                let op = ternary_ops[self.random.below(5)]
+                let kind = self.kind_for(op) else return
+                self.pool.add(self.b.ternary(op, self.operand(kind), self.operand(kind), self.operand(kind)), kind)
+            7:
+                let kind = kinds[self.random.below(7)]
+                self.pool.add(self.b.select(self.operand(.mask), self.operand(kind), self.operand(kind)), kind)
+            8:
+                let from_kind = kinds[self.random.below(7)]
+                let to_kind = kinds[self.random.below(7)]
+                if from_kind != .mask and to_kind != .mask and self.random.chance(6):
+                    self.pool.add(self.b.convert(self.operand(from_kind), to_kind), to_kind)
+                else:
+                    self.pool.add(self.b.cast(self.operand(from_kind), to_kind), to_kind)
+            9:
+                let kind: Kind = .f32 if self.random.chance(2) else .f64
+                let first = self.b.vector(kind, 4)
+                for k: u16 in 0..<4:
+                    self.b.emit(.copy, kind, first + k, self.operand(kind), 0, 0)
+                let width = 2 + self.random.below(3)
+                match self.random.below(6):
+                    0: self.pool.add(self.b.dot(first, first, width), kind)
+                    1: self.pool.add(self.b.length(first, width), kind)
+                    2: self.pool.add(self.b.noise(first, 1 + self.random.below(4)), kind)
+                    3: self.pool.add(self.b.snoise(first, 1 + self.random.below(4)), kind)
+                    4: self.pool.add(self.b.normalize(first, width) + (u16)self.random.below(width), kind)
+                    _: self.pool.add(self.b.fit(first, first + 1, first + 2, first + 3, self.operand(kind)), kind)
+            10:
+                let kind: Kind = .f32 if self.random.chance(2) else .f64
+                self.pool.add(self.b.rand(self.operand(.i64), kind, (u16)self.random.below(3)), kind)
+            _:
+                let kind = kinds[self.random.below(7)]
+                let first = self.b.vector(kind, 4)
+                for k: u16 in 0..<4:
+                    self.b.emit(.copy, kind, first + k, self.operand(kind), 0, 0)
+                let mask = 3 if not self.random.chance(8) else 7
+                let index = self.b.binary(.band, self.operand(.i64), self.b.constant_i64(mask))
+                if self.random.chance(2):
+                    self.b.place(first, 4, index, self.operand(kind))
+                self.pool.add(self.b.pick(first, 4, index), kind)
+
+    ## A statement: a value, or now and then a structure holding more statements.
+    func statement():
+        if self.depth >= 3:
+            self.value()
+            return
+        match self.random.below(16):
+            0: self.masked_region(false)
+            1: self.masked_region(true)
+            2: self.uniform_branch()
+            3: self.masked_loop()
+            4:
+                if self.random.chance(4): self.b.check(self.operand(.mask), "")
+                else: self.value()
+            _: self.value()
+
+    func block():
+        self.depth += 1
+        for _ in 0..<1 + self.random.below(5):
+            self.statement()
+        self.depth -= 1
+
+    ## Assign a fresh value to a register the pool had before a structure.
+    func assign_some(counts: usize[7]):
+        let kind = kinds[self.random.below(7)]
+        let k = (usize)(u8)kind
+        if counts[k] == 0:
+            return
+        let target = self.pool.registers[k][self.random.below(counts[k])]
+        # The inputs (registers 0 to 6) are read-only.
+        if target < 7 or self.b.kind_of(target) != kind:
+            return
+        self.b.assign(target, self.operand(kind))
+
+    ## The enclosing mask and `mask`, as a lowering nests an `if` in another.
+    func narrowed(mask: u16) -> u16:
+        if self.current == 0xFFFF:
+            return mask
+        return self.b.binary(.band, self.current, mask)
+
+    ## Put back the enclosing exec mask.
+    func restore(outer: u16):
+        self.current = outer
+        if outer == 0xFFFF: self.b.exec_all()
+        else: self.b.exec(outer)
+
+    ## exec(m) ... the enclosing mask again, optionally skipped when no lane takes it.
+    func masked_region(skippable: bool):
+        let saved = self.pool
+        let outer = self.current
+        let mask = self.narrowed(self.operand(.mask))
+        let after = self.b.label()
+        if skippable: self.b.jump_if_none(mask, after)
+        self.b.exec(mask)
+        self.current = mask
+        self.block()
+        if self.random.chance(6): self.b.trap("fuzz trap")
+        self.assign_some(saved.counts)
+        self.restore(outer)
+        self.b.bind(after)
+        if skippable: self.pool = saved
+
+    func uniform_branch():
+        let saved = self.pool
+        let skip = self.b.label()
+        self.b.jump_if_false(self.b.uniform_mask("flag", true), skip)
+        self.block()
+        self.assign_some(saved.counts)
+        self.b.bind(skip)
+        self.pool = saved
+
+    func masked_loop():
+        let saved = self.pool
+        let slot = self.b.loop_slot()
+        let count = self.b.binary(.band, self.operand(.i32), self.b.constant_i32(7))
+        let i = self.b.copy(self.b.constant_i32(0))
+        let top = self.b.label()
+        let done = self.b.label()
+        self.b.loop_start(slot)
+        self.b.bind(top)
+        let outer = self.current
+        let looping = self.narrowed(self.b.compare(.lt, i, count))
+        self.b.jump_if_none(looping, done)
+        self.b.exec(looping)
+        self.current = looping
+        self.block()
+        self.assign_some(saved.counts)
+        self.b.assign(i, self.b.binary(.add, i, self.b.constant_i32(1)))
+        self.restore(outer)
+        self.b.loop_step(slot, looping)
+        self.b.jump(top)
+        self.b.bind(done)
+        self.pool = saved
+
+func generate(seed: u64) -> Program!:
+    var maker = Maker(b = Builder(), random = common.Generator(state = seed))
+    for kind in kinds:
+        maker.pool.add(maker.b.input(kind.name(), 0, kind), kind)
+    for _ in 0..<3 + maker.random.below(12):
+        maker.statement()
+    for kind in kinds:
+        maker.b.store(maker.b.output(kind.name(), 0, kind), maker.pool.any(&maker.random, kind))
+    return try maker.b.finish()
+
+func same_fault(a: Fault?, b: Fault?) -> bool:
+    if a == none or b == none:
+        return a == none and b == none
+    let x = a else return false
+    let y = b else return false
+    return x.kind == y.kind and x.lane == y.lane and x.instruction == y.instruction
+
+func describe(program: const Program*, fault: Fault?, schedule: (usize, usize)):
+    if let found = fault:
+        print(f"  {schedule.0} workers, chunks of {schedule.1}: {found.message} at lane {found.lane}, instruction {found.instruction} ({program.instructions()[found.instruction].op.name()})")
+    else:
+        print(f"  {schedule.0} workers, chunks of {schedule.1}: no fault")
+
+## Run at three schedules; the faults, or the outputs, must agree.
+func compare_runs(program: const Program*, data: const Data*, first: Data*, second: Data*, random: common.Generator*) -> (usize, bool)!:
+    let inputs = data.inputs()
+    let uniforms = [Uniform.mask("flag", random.chance(2))]
+    var results: (Fault?)[3]
+    let schedules: (usize, usize)[3] = [(1, 1 + random.below(lanes)), (4, 1 + random.below(64)), (16, 7)]
+    for (at, schedule) in schedules.indexed():
+        let target = first if at == 0 else second
+        target.clear()
+        let outputs = target.outputs()
+        let request = Request(count = lanes, inputs = inputs, outputs = outputs, uniforms = uniforms, threads = schedule.0, chunk = schedule.1, loop_cap = 1000)
+        results[at] = try engine.run(program, &request)
+        if not same_fault(results[at], results[0]):
+            describe(program, results[0], schedules[0])
+            describe(program, results[at], schedule)
+            trap("fuzz: a fault differs between schedules")
+        if at > 0 and results[0] == none and not first.same(second):
+            trap("fuzz: outputs differ between schedules")
+    return (program.instructions().length, results[0] != none)
+
+## Raw instructions: random operations, kinds and registers.
+func raw(seed: u64) -> Program!:
+    var random = common.Generator(state = seed)
+    var b = Builder()
+    let count = 2 + random.below(10)
+    for kind in kinds:
+        _ = b.input(kind.name(), 0, kind)
+    # Fresh registers start as copies of the input of their kind, so reads are defined.
+    for _ in 0..<count:
+        let kind = kinds[random.below(7)]
+        b.emit(.copy, kind, b.register(kind), (u16)(u8)kind, 0, 0)
+    if random.chance(2): _ = b.loop_slot()
+    for _ in 0..<1 + random.below(6):
+        let op = (Op)(u8)random.below(97)
+        var kind = kinds[random.below(7)]
+        for _ in 0..<4:
+            if op.accepts(kind): break
+            kind = kinds[random.below(7)]
+        let registers = (u16)(count + 7 + 2)
+        b.emit(op, kind, (u16)random.below((usize)registers), (u16)random.below((usize)registers), (u16)random.below((usize)registers), (u16)random.below(6))
+    if random.chance(2):
+        b.store(b.output("f32", 0, .f32), (u16)random.below(count + 7))
+    return try b.finish()
+
+pub func run_all() -> !:
+    var random = common.Generator(state = 2026)
+    var data = try Data.make(&random, false)
+    defer data.release()
+    var tame = try Data.make(&random, true)
+    defer tame.release()
+    var first = try Data.make(&random, true)
+    defer first.release()
+    var second = try Data.make(&random, true)
+    defer second.release()
+    var instructions: usize = 0
+    var faulted: usize = 0
+    for at in 0..<programs:
+        var program = try generate(1000 + (u64)at)
+        defer program.destroy()
+        let (length, failed) = try compare_runs(&program, &data if at % 2 == 0 else &tame, &first, &second, &random)
+        instructions += length
+        if failed: faulted += 1
+    print(f"ok    fuzz: {programs} programs, {instructions} instructions, {faulted} stopped by a fault")
+    var accepted: usize = 0
+    for at in 0..<raw_programs:
+        var program = raw(5000 + (u64)at) catch failure:
+            continue
+        defer program.destroy()
+        accepted += 1
+        _ = try compare_runs(&program, &data, &first, &second, &random)
+    print(f"ok    fuzz: {raw_programs} raw programs, {accepted} accepted and run")

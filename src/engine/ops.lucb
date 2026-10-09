@@ -221,16 +221,9 @@ extend Op:
             .exec, .exec_all, .loop_start, .loop_step, .check, .trap, .call => every_kind
             _ => float_kinds
 
-    ## Whether the operation reads its destination (a masked write keeps inactive lanes).
-    func reads_destination() -> bool:
-        return self == .assign or self == .place
-
-    ## Whether it can fault.
-    func can_fault() -> bool:
-        return match self:
-            .add, .sub, .mul, .idiv, .rem, .neg, .abs, .shl, .shr, .convert => true
-            .loop_step, .check, .trap, .pick, .place, .call => true
-            _ => false
+    ## Whether an instruction of this operation may have `kind`.
+    pub func accepts(kind: Kind) -> bool:
+        return (self.kinds() & kind.bit()) != 0
 
     ## The Base-like name, for listings and messages.
     pub func name() -> str:
