@@ -120,30 +120,30 @@ extend Lowerer:
             .block:
                 try self.scan_list(s.body, context, depth)
             .let_, .var_:
-                try self.scan_expression(s.left)
+                try self.scan_expression(s.left, depth)
                 if self.varies(s.left):
                     try self.mark_varying(s)
             .assign:
-                try self.scan_expression(s.right)
+                try self.scan_expression(s.right, depth)
                 try self.scan_place(s.left, context or self.varies(s.right), depth, 16)
             .if_:
-                try self.scan_expression(s.left)
+                try self.scan_expression(s.left, depth)
                 let inner = context or self.varies(s.left)
                 if let then_block = s.body:
                     try self.scan_statement(then_block, inner, depth + 1)
                 if let otherwise = s.right:
                     try self.scan_statement(otherwise, inner, depth + 1)
             .while_:
-                try self.scan_expression(s.left)
+                try self.scan_expression(s.left, depth)
                 try self.scan_list(s.body, context or self.varies(s.left) or has_exit(s.body), depth + 1)
             .for_:
                 let binding = s.left else return
-                try self.scan_expression(s.right)
+                try self.scan_expression(s.right, depth)
                 if self.varies(s.right):
                     try self.mark_varying(binding)
                 try self.scan_list(s.body, context or self.varies(s.right) or has_exit(s.body), depth + 1)
             .match_:
-                try self.scan_expression(s.left)
+                try self.scan_expression(s.left, depth)
                 var arms = s.body
                 var inner = context or self.varies(s.left)
                 while let arm = arms:
@@ -156,14 +156,14 @@ extend Lowerer:
                         try self.scan_statement(arm_body, inner, depth + 1)
                     arms = arm.next
             .return_:
-                try self.scan_expression(s.left)
+                try self.scan_expression(s.left, depth)
             .expr_stmt:
-                try self.scan_expression(s.left)
+                try self.scan_expression(s.left, depth)
             _:
                 return
 
     ## Columns an expression reads, through fields and accessors.
-    func scan_expression(e: ast.Node*?) -> !:
+    func scan_expression(e: ast.Node*?, depth: u32) -> !:
         let node = e else return
         match node.kind:
             .member:
@@ -185,20 +185,20 @@ extend Lowerer:
                         if binding.role == .getter:
                             self.mark_read(at)
                         else:
-                            try self.mark_written(at, 16, false)
-                        try self.scan_expression_list(node.body)
+                            try self.mark_written(at, 16, depth > 0)
+                        try self.scan_expression_list(node.body, depth)
                         return
             _:
                 _ = 0
-        try self.scan_expression(node.left)
-        try self.scan_expression(node.right)
-        try self.scan_expression(node.ty)
-        try self.scan_expression_list(node.body)
+        try self.scan_expression(node.left, depth)
+        try self.scan_expression(node.right, depth)
+        try self.scan_expression(node.ty, depth)
+        try self.scan_expression_list(node.body, depth)
 
-    func scan_expression_list(list: ast.Node*?) -> !:
+    func scan_expression_list(list: ast.Node*?, depth: u32) -> !:
         var cursor = list
         while let node = cursor:
-            try self.scan_expression(node)
+            try self.scan_expression(node, depth)
             cursor = node.next
 
     ## A written place: its root local or column, which lane (16: all), whether masked.
@@ -210,7 +210,7 @@ extend Lowerer:
                 if varying: try self.mark_varying(decl)
                 if depth > 0 or lane == 17: try self.mark_pinned(decl)
             .index:
-                try self.scan_expression(node.body)
+                try self.scan_expression(node.body, depth)
                 var which: usize = 17
                 if let index = node.body:
                     if let constant = self.c.exact_integer(index, 64, true):

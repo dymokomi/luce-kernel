@@ -78,8 +78,10 @@ pub struct Host:
 
     ## Method `member` of `owner` is a parameter: a uniform named by its literal first
     ## argument, with its literal second argument (or the parameter's default) as default.
-    pub func parameter(owner: str, member: str) -> !:
-        try self.add(owner, member, .parameter, "", 1, none)
+    ## A vector one has a uniform per lane up to `components` (`name[0]`, ...); lanes past
+    ## them read 0 (a `vec3` returning `f32[4]` has 3).
+    pub func parameter(owner: str, member: str, components: usize = 16) -> !:
+        try self.add(owner, member, .parameter, "", components, none)
 
     ## Method `member` of struct `owner` (or function `member` of module `owner`) runs
     ## host builtin `builtin` over its arguments, vectors passed lane by lane.
@@ -94,10 +96,12 @@ pub struct Host:
     pub func reader(owner: str, member: str, prefix: str) -> !:
         try self.add(owner, member, .reader, prefix, 1, none)
 
-    ## Reading a column the input lacks gives 0 (VEX's rule) instead of a diagnostic;
-    ## columns it has are still read in their stored kind.
+    ## The input has exactly the columns `column` declares (none, until it is called), and
+    ## reading one it lacks gives 0 (VEX's rule) instead of a diagnostic; columns it has
+    ## are still read in their stored kind.
     pub func missing_reads_zero():
         self.missing_zero = true
+        self.known_columns = true
 
     ## Whether missing columns read as 0.
     pub func reads_missing_as_zero() -> bool:

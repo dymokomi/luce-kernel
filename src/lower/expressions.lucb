@@ -123,7 +123,7 @@ extend Lowerer:
 
     ## Uniform `name` of `type_id`, a vector's lanes named `name[k]`, with the default a
     ## literal (or, for a vector, an array literal of them) gives.
-    func uniform_value(e: ast.Node*, name: str, type_id: u32, default: ast.Node*?) -> Value!:
+    func uniform_value(e: ast.Node*, name: str, type_id: u32, default: ast.Node*?, lanes: usize = 16) -> Value!:
         let (kind, width) = try self.shape_or_fail(e, type_id)
         var defaults: u64[16]
         if let given = default:
@@ -140,7 +140,9 @@ extend Lowerer:
         var value = self.scalar(kind, 0, true, type_id)
         value.width = width
         for k in 0..<width:
-            if width == 1:
+            if k >= lanes:
+                value.lanes[k] = self.b.constant(kind, 0)
+            elif width == 1:
                 value.lanes[k] = self.b.uniform(name, kind, defaults[0])
             else:
                 var room: u8[300]

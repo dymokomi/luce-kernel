@@ -230,6 +230,13 @@ pub func run_all() -> !:
             same("early return", columns.colors[at * 3], 0.0, at)
     print(f"ok    lowering match, labeled break, early return, lazy and: {constructs.program.instructions().length} instructions")
 
+    var branchy = try compiled_or_trap(root, &host, no_header, "if p.ptnum % 2 == 0:\n    p.set_f32(\"mass\", -1.0)\n")
+    defer branchy.destroy()
+    assert(try columns.run(&branchy, common.no_uniforms()) == none)
+    for at in 0..<points:
+        same("a setter in a branch", columns.weighed[at], -1.0 if at % 2 == 0 else columns.masses[at], at)
+    print("ok    lowering a setter inside a branch")
+
     var faulting = try compiled_or_trap(root, &host, no_header, "let x = p.P[0]\nlet q = 100 // (p.ptnum - 10)\np.Cd = [x, (f32)q, 0.0, 0.0]\n")
     defer faulting.destroy()
     let fault = try columns.run(&faulting, common.no_uniforms()) else trap("lowering: no fault")

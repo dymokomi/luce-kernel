@@ -47,6 +47,8 @@ extend Lowerer:
 
     func core_call(e: ast.Node*, name: str) -> Value!:
         let first = e.body
+        # A fault of `assert` or `trap` points at the word, not the parenthesis.
+        let at = e.left else return self.nothing()
         if name == "assert":
             let condition_node = (first else return self.nothing()).left else return self.nothing()
             let condition = try self.expression(condition_node)
@@ -58,7 +60,7 @@ extend Lowerer:
                 var room: u8[400]
                 let spelled = (str)src.bytes[condition_node.start..<condition_node.end]
                 message = try self.texts.keep_text((strings.format(room, f"assert failed: {spelled}") else "assert failed").bytes)
-            self.position(e)
+            self.position(at)
             self.sync()
             self.b.check(condition.lanes[0], message)
             return self.nothing()
@@ -66,12 +68,12 @@ extend Lowerer:
             var message = "trap"
             if let argument = first:
                 message = try self.text_literal(argument.left)
-            self.position(e)
+            self.position(at)
             self.sync()
             self.b.trap(message)
             return self.nothing()
         var room: u8[100]
-        return try self.not_available(e, strings.format(room, f"`{name}`") else "this call")
+        return try self.not_available(at, strings.format(room, f"`{name}`") else "this call")
 
     ## The text of a string literal (simple escapes decoded).
     func text_literal(node: ast.Node*?) -> str!:
@@ -154,7 +156,7 @@ extend Lowerer:
                         if let first_parameter = decl.right:
                             if let second_parameter = first_parameter.next:
                                 default = second_parameter.left
-                return try self.uniform_value(e, name, e.type_id, default)
+                return try self.uniform_value(e, name, e.type_id, default, binding.components)
             .builtin:
                 return try self.builtin_call(e, binding)
             .computed:
