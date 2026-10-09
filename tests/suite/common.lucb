@@ -1,0 +1,35 @@
+## Helpers the suites share: empty column and uniform lists, a seeded generator, and the
+## thread counts and chunk sizes every result must not depend on.
+from luce_kernel.engine import Column, Uniform
+
+## The worker counts a result must be the same at.
+pub let thread_counts: usize[3] = [1, 2, 16]
+## Chunk sizes, small enough that the suites' lane counts cross many chunks.
+pub let chunk_sizes: usize[3] = [64, 1000, 4096]
+
+pub func no_columns() -> const Column[]:
+    var none_given: const Column[]
+    return none_given
+
+pub func no_uniforms() -> const Uniform[]:
+    var none_given: const Uniform[]
+    return none_given
+
+## SplitMix64: a small seeded generator for the fuzzer and the sample data.
+pub struct Generator:
+    var state: u64
+
+    pub func next() -> u64:
+        self.state = self.state +% 0x9E3779B97F4A7C15
+        var z = self.state
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+        return z ^ (z >> 31)
+
+    ## A number below `bound` (above zero).
+    pub func below(bound: usize) -> usize:
+        return (usize)(self.next() % (u64)bound)
+
+    ## True one time in `odds`.
+    pub func chance(odds: usize) -> bool:
+        return self.below(odds) == 0

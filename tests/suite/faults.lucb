@@ -1,0 +1,218 @@
+## The fault suite: every Base trap stops the run with its kind, line and column and the
+## lowest failing lane, the same at 1, 2 and 16 workers and every chunk size. Lane 300 is
+## always bad but inactive (outside the exec mask), so it must never be reported; lanes
+## 7777 and 9100 are bad and active, so 7777 is.
+import memory
+from luce_kernel import engine
+from luce_kernel.engine import Builder, Column, Request, Program, FaultKind, Kind, Builtin, Call, Op
+import common
+
+let lanes: usize = 10000
+let inactive_lane: usize = 300
+let first_bad: usize = 7777
+let second_bad: usize = 9100
+
+## `lanes` values of `normal`, with the bad lanes set to `bad`.
+func filled[T](normal: T, bad: T) -> T[]!:
+    let made = try new T[lanes] --- in memory.heap
+    for at in 0..<lanes: made[at] = normal
+    made[inactive_lane] = bad
+    made[first_bad] = bad
+    made[second_bad] = bad
+    return made
+
+## Every lane active but `inactive_lane`.
+func active_lanes() -> u8[]!:
+    let made = try new u8[lanes] in memory.heap
+    for at in 0..<lanes: made[at] = 1
+    made[inactive_lane] = 0
+    return made
+
+## A builder whose instructions run under the `on` mask, positioned at `line`.
+func start(line: u32) -> Builder:
+    var b = Builder()
+    b.exec(b.input("on", 0, .mask))
+    b.at(line, 9)
+    return b
+
+## Store `value` (any kind but mask) to "y" so every program has an output, and finish.
+func finish(b: Builder*, value: u16) -> Program!:
+    b.at(99, 1)
+    let kind = b.kind_of(value) else trap("no kind")
+    b.store(b.output("y", 0, .f32), value if kind == .f32 else b.cast(value, .f32))
+    return try b.finish()
+
+## Run `program` at every thread count and chunk size; each must stop at `lane` with
+## `kind` at `line`:9 and `message`, leaving `x` as it was.
+func expect(name: str, program: const Program*, x: Column, kind: FaultKind, lane: usize, line: u32, message: str, loop_cap: u64 = 1000000) -> !:
+    let on = try active_lanes()
+    defer free(on) in memory.heap
+    let sink = try new f32[lanes] in memory.heap
+    defer free(sink) in memory.heap
+    let inputs = [x, Column.input_mask("on", on)]
+    let outputs = [Column.output_f32("y", sink)]
+    for threads in common.thread_counts:
+        for chunk in common.chunk_sizes:
+            let request = Request(count = lanes, inputs = inputs, outputs = outputs, uniforms = common.no_uniforms(), threads = threads, chunk = chunk, loop_cap = loop_cap)
+            let fault = try engine.run(program, &request) else trap("the run did not fault")
+            if fault.kind != kind or fault.lane != lane or fault.line != line or fault.column != 9 or fault.message != message:
+                print(f"FAIL  fault {name} at {threads} workers, chunks of {chunk}: lane {fault.lane}, line {fault.line}:{fault.column}, {fault.message}")
+                trap("fault suite")
+    let request = Request(count = lanes, inputs = inputs, outputs = outputs, uniforms = common.no_uniforms(), loop_cap = loop_cap)
+    let fault = try engine.run(program, &request) else trap("no fault")
+    var room: u8[160]
+    print(f"ok    fault {name}: {fault.describe(room, "point")}")
+
+func fail_negative(call: Call*):
+    let values = call.f32_argument(0)
+    let results = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        results[lane] = values[lane]
+        if values[lane] < 0.0: call.fail(lane)
+
+pub func run_all() -> !:
+    let ints = try filled[i32](1, 1000)
+    defer free(ints) in memory.heap
+    let longs = try filled[i64](1, 0)
+    defer free(longs) in memory.heap
+    let floats = try filled[f32](1.0, 3.0e9)
+    defer free(floats) in memory.heap
+    let negatives = try filled[f32](1.0, -1.0)
+    defer free(negatives) in memory.heap
+    let unsigned_values = try filled[u64](9, 3)
+    defer free(unsigned_values) in memory.heap
+    let indices = try filled[i64](1, 4)
+    defer free(indices) in memory.heap
+    let shifts = try filled[i32](3, 32)
+    defer free(shifts) in memory.heap
+    let lowest = try filled[i32](1, -2147483648)
+    defer free(lowest) in memory.heap
+    let counts = try filled[i32](3, 1000)
+    defer free(counts) in memory.heap
+    let sevens = try filled[i32](1, 7)
+    defer free(sevens) in memory.heap
+    let large = try filled[i32](1, 500)
+    defer free(large) in memory.heap
+
+    var bounds = start(11)
+    let first = bounds.vector(.f32, 4)
+    for k: u16 in 0..<4: bounds.emit(.copy, .f32, first + k, bounds.constant_f32((f32)k), 0, 0)
+    var program = try finish(&bounds, bounds.pick(first, 4, bounds.input("x", 0, .i64)))
+    try expect("bounds", &program, Column.input_i64("x", indices), .bounds, first_bad, 11, "index out of bounds")
+    program.destroy()
+
+    var overflow = start(12)
+    program = try finish(&overflow, overflow.binary(.add, overflow.input("x", 0, .i32), overflow.constant_i32(2147483000)))
+    try expect("overflow", &program, Column.input_i32("x", ints), .overflow, first_bad, 12, "integer overflow")
+    program.destroy()
+
+    var division = start(13)
+    program = try finish(&division, division.binary(.idiv, division.constant_i64(100), division.input("x", 0, .i64)))
+    try expect("division", &program, Column.input_i64("x", longs), .division, first_bad, 13, "division by zero")
+    program.destroy()
+
+    var shift = start(14)
+    program = try finish(&shift, shift.binary(.shl, shift.constant_i32(1), shift.input("x", 0, .i32)))
+    try expect("shift", &program, Column.input_i32("x", shifts), .shift, first_bad, 14, "shift count out of range")
+    program.destroy()
+
+    var conversion = start(15)
+    program = try finish(&conversion, conversion.convert(conversion.input("x", 0, .f32), .i32))
+    try expect("conversion", &program, Column.input_f32("x", floats), .conversion, first_bad, 15, "value does not fit the type")
+    program.destroy()
+
+    var assertion = start(16)
+    let x16 = assertion.input("x", 0, .i32)
+    assertion.check(assertion.compare(.lt, x16, assertion.constant_i32(100)), "x stays below 100")
+    program = try finish(&assertion, x16)
+    try expect("assert", &program, Column.input_i32("x", large), .assertion, first_bad, 16, "x stays below 100")
+    program.destroy()
+
+    var trapping = start(17)
+    let x17 = trapping.input("x", 0, .i32)
+    let on = trapping.input("on", 0, .mask)
+    trapping.exec(trapping.binary(.band, on, trapping.compare(.eq, x17, trapping.constant_i32(7))))
+    trapping.trap("seven is not allowed")
+    trapping.exec(on)
+    program = try finish(&trapping, x17)
+    try expect("trap", &program, Column.input_i32("x", sevens), .trap, first_bad, 17, "seven is not allowed")
+    program.destroy()
+
+    var looping = start(18)
+    program = try finish(&looping, counting_loop(&looping, looping.input("x", 0, .i32)))
+    try expect("loop cap", &program, Column.input_i32("x", counts), .loop_cap, first_bad, 18, "loop ran too many times", loop_cap = 50)
+    program.destroy()
+
+    var host = start(19)
+    let builtin = Builtin(name = "positive", arguments = [.f32, .f32, .f32, .f32, .f32, .f32, .f32, .f32], argument_count = 1, results = [.f32, .f32, .f32, .f32], result_count = 1, run = fail_negative, context = none)
+    program = try finish(&host, host.call(builtin, [host.input("x", 0, .f32)]))
+    try expect("host", &program, Column.input_f32("x", negatives), .host, first_bad, 19, "builtin failed")
+    program.destroy()
+
+    var unsigned_sub = start(20)
+    program = try finish(&unsigned_sub, unsigned_sub.binary(.sub, unsigned_sub.input("x", 0, .u64), unsigned_sub.constant_u64(5)))
+    try expect("unsigned underflow", &program, Column.input_u64("x", unsigned_values), .overflow, first_bad, 20, "integer overflow")
+    program.destroy()
+
+    var negation = start(21)
+    program = try finish(&negation, negation.unary(.neg, negation.input("x", 0, .i32)))
+    try expect("negation", &program, Column.input_i32("x", lowest), .overflow, first_bad, 21, "integer overflow")
+    program.destroy()
+
+    var remainder = start(22)
+    program = try finish(&remainder, remainder.binary(.rem, remainder.input("x", 0, .i32), remainder.constant_i32(-1)))
+    try expect("remainder", &program, Column.input_i32("x", lowest), .overflow, first_bad, 22, "integer overflow")
+    program.destroy()
+
+    try lower_lane_later()
+
+## A lane that fails on a later instruction still wins over a higher lane that failed on
+## an earlier one, in the same chunk and across chunks.
+func lower_lane_later() -> !:
+    let divisors = try new i64[lanes] in memory.heap
+    defer free(divisors) in memory.heap
+    let addends = try new i32[lanes] in memory.heap
+    defer free(addends) in memory.heap
+    for at in 0..<lanes:
+        divisors[at] = 1
+        addends[at] = 0
+    divisors[5000] = 0
+    addends[4995] = 100
+    var b = start(30)
+    let quotient = b.binary(.idiv, b.constant_i64(100), b.input("x", 0, .i64))
+    b.at(31, 9)
+    let sum = b.binary(.add, b.input("z", 0, .i32), b.constant_i32(2147483600))
+    var program = try finish(&b, b.binary(.add, b.cast(quotient, .f32), b.cast(sum, .f32)))
+    defer program.destroy()
+    let on = try active_lanes()
+    defer free(on) in memory.heap
+    let sink = try new f32[lanes] in memory.heap
+    defer free(sink) in memory.heap
+    for threads in common.thread_counts:
+        for chunk in common.chunk_sizes:
+            let inputs = [Column.input_i64("x", divisors), Column.input_i32("z", addends), Column.input_mask("on", on)]
+            let request = Request(count = lanes, inputs = inputs, outputs = [Column.output_f32("y", sink)], uniforms = common.no_uniforms(), threads = threads, chunk = chunk)
+            let fault = try engine.run(&program, &request) else trap("no fault")
+            assert(fault.kind == .overflow and fault.lane == 4995 and fault.line == 31)
+    print("ok    fault lower lane on a later instruction")
+
+## total = 2 * count, each lane running `count` rounds.
+pub func counting_loop(b: Builder*, count: u16) -> u16:
+    let slot = b.loop_slot()
+    let i = b.copy(b.constant_i32(0))
+    let total = b.copy(b.constant_i32(0))
+    let top = b.label()
+    let done = b.label()
+    let outer = b.input("on", 0, .mask)
+    b.loop_start(slot)
+    b.bind(top)
+    let looping = b.binary(.band, outer, b.compare(.lt, i, count))
+    b.jump_if_none(looping, done)
+    b.exec(looping)
+    b.assign(i, b.binary(.add, i, b.constant_i32(1)))
+    b.assign(total, b.binary(.add, total, b.constant_i32(2)))
+    b.loop_step(slot, looping)
+    b.jump(top)
+    b.bind(done)
+    b.exec(outer)
+    return total
