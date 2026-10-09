@@ -115,9 +115,11 @@ pub enum Op as u8:
     place = 94
     store = 95
     call = 96
+    # Library fields evaluated per lane
+    field = 97
 
 ## How many operations there are.
-let op_count: usize = 97
+let op_count: usize = 98
 
 ## The register pattern of an operation, which `verify` checks.
 enum Shape:
@@ -149,6 +151,9 @@ enum Shape:
     noise
     ## d = rand(i64 seed a, stream c).
     random
+    ## d.. = lib field `c` (curl noise, Worley, ...) of the f32 point in registers a..,
+    ## its results in consecutive f32 registers from d (see `field_shape`).
+    field
     ## jump to a.
     jump
     ## jump to a when mask b says so.
@@ -193,6 +198,7 @@ extend Op:
             .length, .length2, .normalize => Shape.vector1
             .noise, .snoise => Shape.noise
             .rand => Shape.random
+            .field => Shape.field
             .jump => Shape.jump
             .jump_if_true, .jump_if_false, .jump_if_any, .jump_if_none => Shape.branch
             .exec => Shape.exec
@@ -229,7 +235,7 @@ extend Op:
     pub func name() -> str:
         return op_names[(usize)self]
 
-let op_names: str[97] = [
+let op_names: str[98] = [
     "copy", "assign", "select", "index", "add", "sub", "mul", "div", "wadd", "wsub",
     "wmul", "sadd", "ssub", "smul", "idiv", "rem", "min", "max", "band", "bor",
     "bxor", "shl", "shr", "pow", "atan2", "fmod", "hypot", "neg", "wneg", "abs",
@@ -239,5 +245,28 @@ let op_names: str[97] = [
     "lt", "le", "gt", "ge", "convert", "cast", "mul_add", "lerp", "clamp", "smooth",
     "fit01", "fit", "dot", "cross", "length", "length2", "distance", "distance2", "normalize", "noise",
     "snoise", "rand", "jump", "jump_if_true", "jump_if_false", "jump_if_any", "jump_if_none", "exec", "exec_all", "loop_start",
-    "loop_step", "check", "trap", "pick", "place", "store", "call",
+    "loop_step", "check", "trap", "pick", "place", "store", "call", "field",
 ]
+
+## The library fields the `field` operation evaluates natively, by its `c`.
+pub let field_curl: u16 = 0
+pub let field_xnoised: u16 = 1
+pub let field_wnoise: u16 = 2
+pub let field_flow: u16 = 3
+pub let field_alligator: u16 = 4
+pub let field_noised: u16 = 5
+pub let field_pnoise: u16 = 6
+pub let field_onoise: u16 = 7
+pub let field_anoise: u16 = 8
+
+## How many f32 inputs and results field `code` has; (0, 0) for no field.
+pub func field_shape(code: u16) -> (u16, u16):
+    return match code:
+        0 => (3, 3)
+        1 => (3, 4)
+        2 => (3, 3)
+        3 => (4, 1)
+        4 => (3, 1)
+        5 => (3, 4)
+        6, 7, 8 => (6, 1)
+        _ => (0, 0)

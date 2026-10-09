@@ -3,8 +3,8 @@
 # place; a lookup visits the 27 cells around the point.
 
 ## Worley distances (VEX `wnoise`'s outputs): `f1` to the nearest feature point and `f2`
-## to the second nearest (Euclidean, not squared), and `seed`, a number naming the
-## nearest point's cell (the same for every position nearest that point).
+## to the second nearest (Euclidean, not squared), and `seed`, a number in 0..2^24
+## naming the nearest point's cell (the same for every position nearest that point).
 pub struct Worley:
     pub var f1: f32 = 0.0
     pub var f2: f32 = 0.0
@@ -45,7 +45,7 @@ pub func wnoise(p: f32[4]) -> Worley:
             nearest = (i64)i
         elif d < f2:
             f2 = d
-    let seed = (i32)(cell_bits(cx + nearest % 3 - 1, cy + (nearest // 3) % 3 - 1, cz + nearest // 9 - 1, 23) >> 33)
+    let seed = (i32)(cell_bits(cx + nearest % 3 - 1, cy + (nearest // 3) % 3 - 1, cz + nearest // 9 - 1, 23) >> 40)
     return Worley(f1 = f1, f2 = f2, seed = seed)
 
 ## A random value in `[0, 1)` constant over each unit cell (MaterialX and VEX

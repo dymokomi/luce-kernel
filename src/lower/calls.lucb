@@ -329,6 +329,8 @@ extend Lowerer:
         let count = try self.arguments(e, decl, values)
         let name = decl.text
         self.position(e)
+        if let code = field_code(name):
+            return try self.field_call(e, name, code, values)
         let (kind, width) = try self.shape_or_fail(e, e.type_id)
         var uniform = true
         for k in 0..<count: uniform = uniform and values[k].uniform
@@ -380,6 +382,47 @@ extend Lowerer:
         let point = self.consecutive(values[0])
         let value = self.b.snoise(point, dimensions) if signed else self.b.noise(point, dimensions)
         return self.scalar(kind, value, uniform, e.type_id)
+
+    ## A lib field the engine runs natively (`curlnoise`, `wnoise`, ...): its results in
+    ## the call's type, a vector or a record.
+    func field_call(e: ast.Node*, name: str, code: u16, values: Value[]) -> Value!:
+        # The inputs as consecutive f32 registers: the point's three lanes, then any
+        # numbers after it (whole ones converted: periods and octaves are small).
+        var point = values[0]
+        point.kind = .f32
+        point.width = 4
+        var uniform = values[0].uniform
+        let extra: usize = 1 if name == "flownoise" else (3 if code == field_pnoise or code == field_onoise or code == field_anoise else 0)
+        for k in 0..<extra:
+            let given = values[1 + k]
+            var lane = given.lanes[0]
+            if given.kind != .f32:
+                self.sync()
+                lane = self.b.convert(lane, .f32)
+            point.lanes[3 + k] = lane
+            uniform = uniform and given.uniform
+        point.width = 3 + extra if extra > 0 else 4
+        point.borrowed = extra > 0
+        let first = self.b.field(code, self.consecutive(point))
+        if name == "flownoise" or name == "alligator" or extra == 3:
+            return self.scalar(.f32, first, uniform, e.type_id)
+        if name == "curlnoise":
+            var result = self.zero(.f32, 4, e.type_id)
+            for k: u16 in 0..<3: result.lanes[(usize)k] = first + k
+            result.uniform = uniform
+            return result
+        let shape = self.record(e.type_id) else return try self.fail_value(e, "internal: a field's record")
+        var result = self.zero_record(shape, e.type_id)
+        result.uniform = uniform
+        if name == "wnoise":
+            result.lanes[0] = first
+            result.lanes[1] = first + 1
+            self.sync()
+            result.lanes[2] = self.b.convert(first + 2, .i32)
+            return result
+        # NoiseD: the value, then the gradient's three lanes (the fourth stays zero).
+        for k: u16 in 0..<4: result.lanes[(usize)k] = first + k
+        return result
 
     func math_call(e: ast.Node*, decl: ast.Node*) -> Value!:
         var values: Value[3]
@@ -482,7 +525,20 @@ func has_operation(name: str) -> bool:
     let names: str[47] = ["dot", "dot2d", "dot64", "length", "length2d", "length64", "length2", "length2_64", "distance", "distance2d", "distance64", "distance2", "distance2_64", "cross", "cross64", "normalized", "normalized2d", "normalized64", "lerp", "lerp64", "clamp", "clamp64", "smooth", "smooth64", "fit01", "fit01_64", "fit", "fit64", "degrees", "degrees64", "radians", "radians64", "rand", "rand64", "rand3", "rand_stream", "rand_stream64", "snoise1", "snoise2", "snoise", "snoise4", "noise1", "noise2", "noise", "noise4", "snoise1_64", "noise1_64"]
     for known in names:
         if known == name: return true
-    return noise_shape(name) != none
+    return noise_shape(name) != none or field_code(name) != none
+
+## The engine field of lib function `name`, if it has one.
+func field_code(name: str) -> u16?:
+    if name == "curlnoise": return field_curl
+    if name == "xnoised": return field_xnoised
+    if name == "noised": return field_noised
+    if name == "wnoise": return field_wnoise
+    if name == "flownoise": return field_flow
+    if name == "alligator": return field_alligator
+    if name == "pnoise": return field_pnoise
+    if name == "onoise": return field_onoise
+    if name == "anoise": return field_anoise
+    return none
 
 ## lib's noise functions: signed or not, and dimensions.
 func noise_shape(name: str) -> (bool, usize)?:

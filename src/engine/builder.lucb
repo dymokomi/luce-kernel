@@ -494,6 +494,15 @@ pub struct Builder:
         self.emit(op, kind, dst, a, b, (u16)width)
         return dst
 
+    ## Library field `code` (`field_curl` ...) of the f32 point in consecutive registers
+    ## from `point`: the first of its consecutive f32 results.
+    pub func field(code: u16, point: u16) -> u16:
+        let (inputs, results) = field_shape(code)
+        _ = inputs
+        let dst = self.vector(.f32, (usize)results)
+        self.emit(.field, .f32, dst, point, 0, code)
+        return dst
+
     func noise_of(op: Op, point: u16, dimensions: usize) -> u16:
         let kind = self.kind_or_fail(point)
         let dst = self.register(kind)

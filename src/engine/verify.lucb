@@ -145,6 +145,13 @@ func check_instruction(program: const Program*, ins: Instruction) -> !:
         .random:
             try expect(program, ins.dst, kind)
             try expect(program, ins.a, .i64)
+        .field:
+            let (inputs, results) = field_shape(ins.c)
+            if inputs == 0 or kind != .f32:
+                error(bad_program, "a field that does not exist, or not of f32")
+            try expect_run(program, ins.a, inputs, .f32)
+            try expect_run(program, ins.dst, results, .f32)
+            try disjoint(ins.dst, results, ins.a, inputs)
         .jump:
             try expect_target(program, ins.a)
         .branch:
@@ -253,6 +260,8 @@ func reads_of(program: const Program*, ins: Instruction) -> Registers:
             found.add_run(ins.a, width)
         .random:
             found.add(ins.a)
+        .field:
+            found.add_run(ins.a, field_shape(ins.c).0)
         .branch:
             found.add(ins.b)
         .loop_step:
@@ -283,6 +292,8 @@ func writes_of(program: const Program*, ins: Instruction) -> Registers:
             found.add_run(ins.dst, 3 if ins.op == .cross else 1)
         .vector1:
             found.add_run(ins.dst, ins.c if ins.op == .normalize else 1)
+        .field:
+            found.add_run(ins.dst, field_shape(ins.c).1)
         .place:
             found.add_run(ins.dst, ins.c)
         .call:

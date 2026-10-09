@@ -30,4 +30,4 @@ from luce_base import embed
 from luce_base.front import ast
 from luce_base.sema import check, types
 import engine
-from engine import Builder, Program, Kind, Op, Builtin, no_register
+from engine import Builder, Program, Kind, Op, Builtin, no_register, field_curl, field_xnoised, field_noised, field_wnoise, field_flow, field_alligator, field_pnoise, field_onoise, field_anoise

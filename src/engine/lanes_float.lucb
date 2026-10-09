@@ -164,6 +164,57 @@ func noise_lanes(w: Worker*, ins: Instruction):
                 _ => lib.snoise4_64([x[i], y[i], z[i], t[i]])
             d[i] = value if signed else 0.5 + 0.5 * value
 
+## d.. = library field `c` of the f32 point in registers a.. (see `field_shape`): the
+## lib's own Base functions, run natively per lane.
+func field_lanes(w: Worker*, ins: Instruction):
+    let x = w.f32s(ins.a)
+    let y = w.f32s(ins.a + 1)
+    let z = w.f32s(ins.a + 2)
+    let d0 = w.f32s(ins.dst)
+    match ins.c:
+        0:
+            let d1 = w.f32s(ins.dst + 1)
+            let d2 = w.f32s(ins.dst + 2)
+            for i in 0..<d0.length:
+                let v = lib.curlnoise([x[i], y[i], z[i], 0.0])
+                d0[i] = v[0]
+                d1[i] = v[1]
+                d2[i] = v[2]
+        1, 5:
+            let d1 = w.f32s(ins.dst + 1)
+            let d2 = w.f32s(ins.dst + 2)
+            let d3 = w.f32s(ins.dst + 3)
+            for i in 0..<d0.length:
+                let n = lib.noised([x[i], y[i], z[i], 0.0]) if ins.c == 5 else lib.xnoised([x[i], y[i], z[i], 0.0])
+                d0[i] = n.value
+                d1[i] = n.derivative[0]
+                d2[i] = n.derivative[1]
+                d3[i] = n.derivative[2]
+        2:
+            let d1 = w.f32s(ins.dst + 1)
+            let d2 = w.f32s(ins.dst + 2)
+            for i in 0..<d0.length:
+                let cell = lib.wnoise([x[i], y[i], z[i], 0.0])
+                d0[i] = cell.f1
+                d1[i] = cell.f2
+                d2[i] = (f32)cell.seed
+        3:
+            let flow = w.f32s(ins.a + 3)
+            for i in 0..<d0.length: d0[i] = lib.flownoise([x[i], y[i], z[i], 0.0], flow[i])
+        6, 7, 8:
+            # pnoise's periods, or the fractal's octaves, roughness and attenuation.
+            let u = w.f32s(ins.a + 3)
+            let v = w.f32s(ins.a + 4)
+            let t = w.f32s(ins.a + 5)
+            for i in 0..<d0.length:
+                let p: f32[4] = [x[i], y[i], z[i], 0.0]
+                d0[i] = match ins.c:
+                    6 => lib.pnoise(p, (i32)u[i], (i32)v[i], (i32)t[i])
+                    7 => lib.onoise(p, (i32)u[i], v[i], t[i])
+                    _ => lib.anoise(p, (i32)u[i], v[i], t[i])
+        _:
+            for i in 0..<d0.length: d0[i] = lib.alligator([x[i], y[i], z[i], 0.0])
+
 ## d = rand_stream(seed a, stream c).
 func rand_lanes(w: Worker*, ins: Instruction):
     let seeds = w.i64s(ins.a)

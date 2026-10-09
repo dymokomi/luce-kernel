@@ -38,7 +38,9 @@ extend Lowerer:
                 value = self.zero_record(shape, s.type_id)
             else:
                 return try self.fail(s, "an API value needs a value")
-            if value.handle:
+            # An API value written again inside a loop or branch (`s = s.concat(t)`) gets
+            # registers of its own like any variable; otherwise it is the value itself.
+            if value.handle and not self.is_pinned(s):
                 try self.locals.append(Local(decl = s, value = value, pinned = false, uniform = value.uniform))
                 return
             try self.declare(s, value)
