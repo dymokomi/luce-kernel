@@ -157,14 +157,23 @@ func complete_open(result: embed.Checked*, prefix: str, locals: const ScopeName[
     for keyword in file_keywords:
         if strings.starts_with(keyword, prefix): try completion.add(keyword, .keyword, "", "")
 
-## The file's imported names and its own declarations starting with `prefix`.
+## The file's imported names and its own declarations starting with `prefix`: those the
+## check kept, then those it pruned (a helper nothing calls yet), from the parsed text.
 func add_top_level(help: const FileHelp*, prefix: str, completion: Completion*) -> !:
-    var cursor = help.tree.body
+    try add_names(help, help.tree.body, false, prefix, completion)
+    if let parsed = help.parsed: try add_names(help, parsed.body, true, prefix, completion)
+
+## The names the top-level declarations from `first` on bring in; `pruned`: only those the
+## checked tree no longer holds.
+func add_names(help: const FileHelp*, first: ast.Node*?, pruned: bool, prefix: str, completion: Completion*) -> !:
+    var cursor = first
     while let d = cursor:
         cursor = d.next
         if d.kind == ast.Kind.import_:
             let spelled = import_name(d)
-            if strings.starts_with(spelled, prefix): try completion.add(spelled, .type_, "module", d.text)
+            if not strings.starts_with(spelled, prefix): continue
+            if pruned and help.name_in(help.tree.body, spelled) != none: continue
+            try completion.add(spelled, .type_, "module", d.text)
             continue
         if d.kind == ast.Kind.from_import:
             var imported = d.body
@@ -173,12 +182,16 @@ func add_top_level(help: const FileHelp*, prefix: str, completion: Completion*) 
                 var spelled = n.text
                 if let alias = n.left: spelled = alias.text
                 if not strings.starts_with(spelled, prefix): continue
-                let decl = n.resolved else continue
-                let module = help.module_of(decl) else continue
+                if pruned and help.name_in(help.tree.body, spelled) != none: continue
+                let (decl, module) = help.imported(d, n) else continue
+                if decl.kind == ast.Kind.module:
+                    try completion.add(spelled, .type_, "module", d.text)
+                    continue
                 let kind = decl_kind(decl) else continue
                 try help.add_decl(decl, module, .function if kind == .method else kind, completion)
             continue
         if d.text.length == 0 or not strings.starts_with(d.text, prefix): continue
+        if pruned and help.name_in(help.tree.body, d.text) != none: continue
         let kind = decl_kind(d) else continue
         try help.add_decl(d, help.file, .function if kind == .method else kind, completion)
 

@@ -22,6 +22,10 @@ let check_manifest: str = "#prisma 4.0\ndef package \"help-check\" {\n    str ow
 ## The script, lines 1 to 8.
 let script: str = "from help_dep.tools import Brush\nfrom help_dep import tools\n\npub func run(scale: f32) -> f32:\n    let b = Brush.make(scale)\n    let d = tools.double(b.width)\n    return d + b.area()\n"
 
+## A script whose helper nothing calls yet and whose imports nothing uses yet, lines 1 to
+## 9: the check prunes all three, completion still lists them.
+let unused_script: str = "from help_dep.tools import Brush\nfrom help_dep import tools\n\n## Half of `x`.\nfunc halve(x: f32) -> f32:\n    return x / 2.0\n\npub func run(scale: f32) -> f32:\n    return scale\n"
+
 pub func run_all() -> !:
     var room: u8[512]
     let base = try strings.format(room, f"{path.temp()}/luce-kernel-file-help")
@@ -71,17 +75,37 @@ pub func run_all() -> !:
     try expect_hover(file, script, 5, 9, "b: Brush", "hovering a local's declaration")
     try expect_hover(file, script, 1, 30, "struct Brush\nA brush for painting.", "hovering an imported type")
     print("ok    file help: members of locals, types and modules, the open, hover, a diagnostic")
+    # What the check pruned: an unused helper, an unused imported type and module.
+    try expect_items_in(file, unused_script, "    let h = hal", 10, 16, ["halve"], ["run"], "an unused helper in the open")
+    try expect_items_in(file, unused_script, "    let w = Bru", 10, 16, ["Brush"], ["halve"], "an unused imported type in the open")
+    try expect_items_in(file, unused_script, "    let t = too", 10, 16, ["tools"], ["Brush"], "an unused imported module in the open")
+    try expect_items_in(file, unused_script, "    tools.", 10, 11, ["double", "Brush"], ["secret"], "an unused imported module's members")
+    try expect_items_in(file, unused_script, "    Brush.", 10, 11, ["make"], ["area"], "an unused imported type's static functions")
+    var helper = try complete_in(file, unused_script, "    let h = hal", 10, 16)
+    defer helper.destroy()
+    var described = false
+    for item in helper.items():
+        if item.label == "halve": described = item.kind == .function and item.detail == "halve(x: f32) -> f32" and item.doc == "Half of `x`."
+    expect(described, "an unused helper's signature and doc")
+    print("ok    file help: what the check pruned (an unused helper and imports)")
 
 ## The script with `extra` after its last line, completed at `line`, `column`.
 func complete(file: str, extra: str, line: u32, column: u32) -> lower.Completion!:
+    return try complete_in(file, script, extra, line, column)
+
+## `base` with `extra` after its last line, completed at `line`, `column`.
+func complete_in(file: str, base: str, extra: str, line: u32, column: u32) -> lower.Completion!:
     var text = collections.List[u8]()
     defer text.destroy()
-    for byte in script.bytes: try text.append(byte)
+    for byte in base.bytes: try text.append(byte)
     for byte in extra.bytes: try text.append(byte)
     return try lower.complete_file(file, (str)text.view(), line, column)
 
 func expect_items(file: str, extra: str, line: u32, column: u32, wanted: const str[], unwanted: const str[], what: str) -> !:
-    var completion = try complete(file, extra, line, column)
+    try expect_items_in(file, script, extra, line, column, wanted, unwanted, what)
+
+func expect_items_in(file: str, base: str, extra: str, line: u32, column: u32, wanted: const str[], unwanted: const str[], what: str) -> !:
+    var completion = try complete_in(file, base, extra, line, column)
     defer completion.destroy()
     for name in wanted:
         var found = false

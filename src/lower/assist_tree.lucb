@@ -29,6 +29,12 @@ struct FileHelp:
     let file: usize
     let tree: ast.Node*
     var locals: collections.List[FileLocal]
+    ## The file's top level as its text parses, untyped: the checked tree has lost what the
+    ## checker pruned (§19.6), a helper nothing calls yet or an import nothing uses yet,
+    ## which completion still lists. None when the text does not parse; its nodes live in
+    ## `parsing`.
+    var parsed: ast.Node*? = none
+    var parsing: memory.Arena? = none
 
     ## The help of a check whose entry tree is `tree`; none when the checker holds no
     ## module of that tree.
@@ -41,11 +47,27 @@ struct FileHelp:
                 var help = FileHelp(checker = checker, file = at, tree = tree, locals = collections.List[FileLocal]())
                 errdefer help.destroy()
                 try help.walk(tree.body)
+                help.parse(modules[at].src.bytes)
                 return help
         return none
 
     func destroy():
         self.locals.destroy()
+        if let arena = self.parsing:
+            var held = arena
+            held.destroy()
+        self.parsing = none
+        self.parsed = none
+
+    ## Parse the file's `source` again into `parsed`, in an arena of its own; a source
+    ## that does not parse (or outgrows the arena) leaves it none.
+    func parse(source: const u8[]):
+        var arena = memory.Arena.over(memory.heap, 262144 + 64 * source.length) catch failure:
+            return
+        var scratch: u8[1024]
+        with arena:
+            self.parsed = parser.parse_text((str)source, scratch) catch failure: recover none
+        self.parsing = arena
 
     ## Every `let`, `var`, loop variable and parameter with a type, in the list starting at
     ## `first` and below it.
@@ -156,9 +178,16 @@ struct FileHelp:
         if not self.reachable(found, target.module): return none
         return (found, target.module)
 
-    ## What a name at the file's top level is: one of its imports or its own declarations.
+    ## What a name at the file's top level is: one of its imports or its own declarations,
+    ## as checked, else as parsed (one the check pruned).
     func top_name(name: str) -> (ast.Node*, usize)?:
-        var cursor = self.tree.body
+        if let found = self.name_in(self.tree.body, name): return found
+        let parsed = self.parsed else return none
+        return self.name_in(parsed.body, name)
+
+    ## What `name` is among the top-level declarations from `first` on.
+    func name_in(first: ast.Node*?, name: str) -> (ast.Node*, usize)?:
+        var cursor = first
         while let d = cursor:
             cursor = d.next
             if d.kind == ast.Kind.import_:
@@ -172,13 +201,25 @@ struct FileHelp:
                     imported = n.next
                     var spelled = n.text
                     if let alias = n.left: spelled = alias.text
-                    if spelled != name: continue
-                    let decl = n.resolved else return none
-                    let module = self.module_of(decl) else return none
-                    return (decl, module)
+                    if spelled == name: return self.imported(d, n)
                 continue
             if d.text == name: return (d, self.file)
         return none
+
+    ## What `n` of `from module import n` (`d`) names, with its module: as the check
+    ## resolved it, else (an import the check pruned) the module `module.n` or the
+    ## declaration `n` of `module`.
+    func imported(d: ast.Node*, n: ast.Node*) -> (ast.Node*, usize)?:
+        if let decl = n.resolved:
+            let module = self.module_of(decl) else return none
+            return (decl, module)
+        var room: u8[512]
+        let full = strings.format(room, f"{d.text}.{n.text}") else return none
+        if let index = self.module_named(full): return (self.checker.modules.get(index).tree, index)
+        let index = self.module_named(d.text) else return none
+        let decl = check.find_decl(self.checker.modules.get(index).tree, n.text) else return none
+        if not self.reachable(decl, index): return none
+        return (decl, index)
 
     ## The target of a chain's links, the first a local (typed on `local_line`; none when
     ## it is no local), an import or one of the file's declarations; none when a link is
