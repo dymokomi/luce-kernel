@@ -4,7 +4,8 @@
 import strings
 import time
 from io import path
-from luce_std import collections
+from luce_std import collections, files
+import c
 from luce_kernel import lower
 from luce_kernel.lower import Part, ItemKind
 
@@ -84,6 +85,25 @@ pub func run_all() -> !:
     try expect_hover(file, script, 7, 12, "d: f32", "hovering a local")
     try expect_hover(file, script, 5, 9, "b: Brush", "hovering a local's declaration")
     try expect_hover(file, script, 1, 30, "struct Brush\nA brush for painting.", "hovering an imported type")
+    # Hover and completion timed, the packages loaded: the same text is not written again.
+    var said = collections.List[u8]()
+    defer said.destroy()
+    let hover_start = time.now()
+    for _ in 0..<20:
+        said.clear()
+        try lower.hover_file(file, script, 6, 20, &said)
+    let hovered = time.now() - hover_start
+    let complete_start = time.now()
+    for _ in 0..<20:
+        var timed = try complete(file, "    b.", 8, 7)
+        timed.destroy()
+    print(f"ok    file hover {(f64)hovered / 20.0e6} ms, completion {(f64)(time.now() - complete_start) / 20.0e6} ms")
+    # The file hover checks gone (its directory cleared, say): written again.
+    var gone_room: u8[700]
+    let gone = try strings.format(gone_room, f"{base}/check/src/assist.lucb")
+    gone_room[gone.length] = 0
+    try files.remove_file((c.str)(str)gone_room[..<gone.length])
+    try expect_hover(file, script, 6, 20, "double(x: f32) -> f32\nTwice `x`.", "hovering after the checked file went")
     print("ok    file help: members of locals, types and modules, the open, hover, a diagnostic")
     # What the check pruned: an unused helper, an unused imported type and module.
     try expect_items_in(file, unused_script, "    let h = hal", 10, 16, ["halve"], ["run"], "an unused helper in the open")

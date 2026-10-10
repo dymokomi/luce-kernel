@@ -49,8 +49,7 @@ pub func check_file(path: str, text: str) -> FileCheck!:
     errdefer found.destroy()
     check_lock.lock()
     defer check_lock.unlock()
-    try write_file(path, text)
-    var result = try checked(path)
+    var result = try write_and_check(path, text)
     defer result.close()
     for d in result.diagnostics:
         let severity: Severity = match d.severity:
@@ -96,8 +95,7 @@ pub func complete_file(path: str, text: str, line: u32, column: u32) -> Completi
     defer check_lock.unlock()
     var room: u8[4096]
     let assist = try assist_path(path, room)
-    try write_file(assist, (str)replaced.view())
-    var result = try checked(assist)
+    var result = try write_and_check(assist, (str)replaced.view())
     errdefer result.close()
     let tree = result.tree
     if start > 0 and text.bytes[start - 1] == '.':
@@ -125,8 +123,7 @@ func complete_typed(path: str, text: str, line: u32, locals: const ScopeName[], 
     defer check_lock.unlock()
     var room: u8[4096]
     let assist = try assist_path(path, room)
-    try write_file(assist, (str)replaced.view())
-    var result = try checked(assist)
+    var result = try write_and_check(assist, (str)replaced.view())
     defer result.close()
     if not result.ok(): return false
     let tree = result.tree else return false
@@ -252,8 +249,7 @@ pub func hover_file(path: str, text: str, line: u32, column: u32, out: collectio
     defer check_lock.unlock()
     var room: u8[4096]
     let assist = try assist_path(path, room)
-    try write_file(assist, text)
-    var result = try checked(assist)
+    var result = try write_and_check(assist, text)
     defer result.close()
     let tree = result.tree else return
     let made = try FileHelp.of(&result.checker, tree) else return
@@ -410,6 +406,25 @@ func assist_path(path: str, room: u8[]) -> str!:
     while cut > 0 and path.bytes[cut - 1] != '/' and path.bytes[cut - 1] != '\\': cut -= 1
     return try strings.format(room, f"{(str)path.bytes[..<cut]}assist.lucb")
 
-## Write `text` to `path` (the checker reads the file's own text at every check).
-func write_file(path: str, text: str) -> !:
+## Check `text` as the file at `path`, written there first. The checker reads the file at
+## every check, but a file it read before and nothing rewrote is cheap to check again (on
+## Windows a rewrite took a geocore script's check from 0.5 ms to 3.3 ms, and the write
+## itself 0.6 ms), so the same text to the same path as the last write (hovering, or
+## completing again on one line) is not written again. When such a check finds no tree
+## (the file gone with its directory, say), the text is written and checked again.
+## Under `check_lock`.
+func write_and_check(path: str, text: str) -> embed.Checked!:
+    let same = last_written.length() == path.length + 1 + text.length and (str)last_written.view()[..<path.length] == path and (str)last_written.view()[path.length + 1..] == text
+    if same:
+        var kept = try checked(path)
+        if kept.tree != none: return kept
+        kept.close()
+    last_written.clear()
     try files.write_text(path, text)
+    for byte in path.bytes: try last_written.append(byte)
+    try last_written.append(0)
+    for byte in text.bytes: try last_written.append(byte)
+    return try checked(path)
+
+## The path and text of the last write of `write_and_check`, a zero byte between them.
+var last_written: collections.List[u8] = collections.List[u8]()
