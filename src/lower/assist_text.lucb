@@ -84,6 +84,31 @@ func chain_before(text: str, dot: usize, out: collections.List[Segment]*) -> boo
         at -= 1
     return true
 
+## Where the expression ending just before `dot` starts: a chain of names, calls (generic
+## ones too) and indexes, or a parenthesized expression (`(found else spare)`) at its head.
+func expression_start(text: str, dot: usize) -> usize?:
+    var at = dot
+    while true:
+        while at > 0 and text.bytes[at - 1] == ']':
+            at = opening(text, at - 1, '[', ']') else return none
+        if at > 0 and text.bytes[at - 1] == ')':
+            at = opening(text, at - 1, '(', ')') else return none
+            if word_start(text, at) == at and (at == 0 or text.bytes[at - 1] != ']'): return at
+            while at > 0 and text.bytes[at - 1] == ']':
+                at = opening(text, at - 1, '[', ']') else return none
+        let start = word_start(text, at)
+        if start == at or not name_byte(text.bytes[start]): return none
+        at = start
+        if at == 0 or text.bytes[at - 1] != '.': return at
+        at -= 1
+    return none
+
+## Whether `expression` is names and dots alone (`k.input`), no call or index.
+func plain_chain(expression: str) -> bool:
+    for byte in expression.bytes:
+        if byte == '(' or byte == '[': return false
+    return true
+
 ## The chain an expression starts with (`k.input(0).bounds()` of `k.input(0).bounds().min * 2`);
 ## false when it starts with something else.
 func chain_after(text: str, out: collections.List[Segment]*) -> bool!:

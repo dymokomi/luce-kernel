@@ -22,7 +22,7 @@ func checked_locals(root: str, run_over: RunOver, header: str, body: str, part: 
     var replaced = collections.List[u8]()
     defer replaced.destroy()
     let text = header if part == .header else body
-    try replace_line(text, line, part == .body, names, &replaced)
+    try replace_line(text, line, part == .body, names, "", &replaced)
     var wrapped = try wrap(run_over, (str)replaced.view() if part == .header else header, (str)replaced.view() if part == .body else body)
     defer wrapped.destroy()
     check_lock.lock()
@@ -47,7 +47,9 @@ func checked_locals(root: str, run_over: RunOver, header: str, body: str, part: 
 ## `text` with line `line` holding `_ = (0, a, b)` of `names` at its indentation; nothing
 ## at the header's left edge, where only declarations go (`body`: every line is in the
 ## entry function).
-func replace_line(text: str, line: u32, body: bool, names: const ScopeName[], out: collections.List[u8]*) -> !:
+## `expression`, when given, ends the tuple: a completion after a dot checks what stands
+## before the dot that way, and reads its type from the checked tuple.
+func replace_line(text: str, line: u32, body: bool, names: const ScopeName[], expression: str, out: collections.List[u8]*) -> !:
     var current: u32 = 1
     var at: usize = 0
     while at <= text.length:
@@ -62,6 +64,9 @@ func replace_line(text: str, line: u32, body: bool, names: const ScopeName[], ou
                 for local in names:
                     try append_text(out, ", ")
                     try append_text(out, local.name)
+                if expression.length > 0:
+                    try append_text(out, ", ")
+                    try append_text(out, expression)
                 try append_text(out, ")")
         else:
             try append_text(out, content)

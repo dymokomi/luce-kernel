@@ -83,9 +83,15 @@ pub func complete_file(path: str, text: str, line: u32, column: u32) -> Completi
     var locals = collections.List[ScopeName]()
     defer locals.destroy()
     try lexical_locals(&place, true, false, &locals)
+    # After a dot behind a call or an index (`opened.get().`, `held(b).`, `all[0].`), the
+    # checker types what stands before the dot; a plain chain of names is walked instead.
+    if start > 0 and text.bytes[start - 1] == '.':
+        if let begin = expression_start(text, start - 1):
+            let expression = (str)text.bytes[begin..<start - 1]
+            if not plain_chain(expression) and try complete_typed(path, text, line, locals.view(), expression, prefix, &completion): return completion
     var replaced = collections.List[u8]()
     defer replaced.destroy()
-    try replace_line(text, line, false, locals.view(), &replaced)
+    try replace_line(text, line, false, locals.view(), "", &replaced)
     check_lock.lock()
     defer check_lock.unlock()
     var room: u8[4096]
@@ -107,6 +113,45 @@ pub func complete_file(path: str, text: str, line: u32, column: u32) -> Completi
     else:
         result.close()
     return completion
+
+## Complete the members of what `expression` (the text before the caret's dot) is, as the
+## checker types it: the caret's line becomes `_ = (0, <locals>, <expression>)` and the
+## tuple's last element has the type. False when that does not check, for the walk to try.
+func complete_typed(path: str, text: str, line: u32, locals: const ScopeName[], expression: str, prefix: str, completion: Completion*) -> bool!:
+    var replaced = collections.List[u8]()
+    defer replaced.destroy()
+    try replace_line(text, line, false, locals, expression, &replaced)
+    check_lock.lock()
+    defer check_lock.unlock()
+    var room: u8[4096]
+    let assist = try assist_path(path, room)
+    try write_file(assist, (str)replaced.view())
+    var result = try checked(assist)
+    defer result.close()
+    if not result.ok(): return false
+    let tree = result.tree else return false
+    let tuple = tuple_on(tree.body, line) else return false
+    var last = tuple.body
+    while let element = last:
+        if element.next == none: break
+        last = element.next
+    let typed = last else return false
+    let made = try FileHelp.of(&result.checker, tree) else return false
+    var help = made
+    defer help.destroy()
+    let target = help.type_target(typed.type_id) else return false
+    try help.add_members(target, prefix, completion)
+    return true
+
+## The first tuple written on line `line` in the list at `first` and below it.
+func tuple_on(first: ast.Node*?, line: u32) -> ast.Node*?:
+    var cursor = first
+    while let node = cursor:
+        if node.kind == ast.Kind.tuple and node.line == line: return node
+        for child in [node.left, node.right, node.body, node.ty]:
+            if let found = tuple_on(child, line): return found
+        cursor = node.next
+    return none
 
 ## The members after the dot at `dot`: from this check, else from the last that passed.
 func complete_member(result: embed.Checked*, text: str, dot: usize, prefix: str, locals: const ScopeName[], completion: Completion*) -> !:

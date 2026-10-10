@@ -15,12 +15,16 @@ func expect(condition: bool, what: str):
 
 let dependency_manifest: str = "#prisma 4.0\ndef package \"help-dep\" {\n    str owner = \"luced\"\n    str version = \"0.1.0\"\n    str kind = \"package\"\n    str language = \"luce-base\"\n    str description = \"A dependency of the file help checks.\"\n    str[] public = [\"tools\"]\n}\n"
 
-let tools_text: str = "## Brushes and helpers.\n\n## A brush for painting.\npub struct Brush:\n    ## How wide it paints.\n    pub var width: f32\n    var secret: i32\n\n    ## A brush `width` wide.\n    pub static func make(width: f32) -> Brush:\n        return Brush(width = width, secret = 0)\n\n    ## The area it covers in one dab.\n    pub func area() -> f32:\n        return self.width * self.width\n\n## Twice `x`.\npub func double(x: f32) -> f32:\n    return x * 2.0\n"
+let tools_text: str = "## Brushes and helpers.\n\n## A brush for painting.\npub struct Brush:\n    ## How wide it paints.\n    pub var width: f32\n    var secret: i32\n\n    ## A brush `width` wide.\n    pub static func make(width: f32) -> Brush:\n        return Brush(width = width, secret = 0)\n\n    ## The area it covers in one dab.\n    pub func area() -> f32:\n        return self.width * self.width\n\n## Twice `x`.\npub func double(x: f32) -> f32:\n    return x * 2.0\n\n## A value held for later.\npub struct Holder[T]:\n    pub var value: T\n\n    ## The value held.\n    pub func get() -> T*!:\n        return &self.value\n\n## `value`, held.\npub func held[T](value: T) -> Holder[T]:\n    return Holder[T](value = value)\n"
 
 let check_manifest: str = "#prisma 4.0\ndef package \"help-check\" {\n    str owner = \"luced\"\n    str version = \"0.1.0\"\n    str kind = \"tool\"\n    str language = \"luce-base\"\n    str description = \"The file help checks' check package.\"\n    str entry = \"src/script.lucb\"\n    def dependency \"help-dep\" {\n        str owner = \"luced\"\n        str path = \"../dep\"\n    }\n}\n"
 
 ## The script, lines 1 to 8.
 let script: str = "from help_dep.tools import Brush\nfrom help_dep import tools\n\npub func run(scale: f32) -> f32:\n    let b = Brush.make(scale)\n    let d = tools.double(b.width)\n    return d + b.area()\n"
+
+## A script ending in the open, lines 1 to 5: what follows its last line is reachable, so
+## the checker types it.
+let open_script: str = "from help_dep.tools import Brush\nfrom help_dep import tools\n\npub func look(scale: f32):\n    let b = Brush.make(scale)\n"
 
 ## A script whose helper nothing calls yet and whose imports nothing uses yet, lines 1 to
 ## 9: the check prunes all three, completion still lists them.
@@ -62,6 +66,12 @@ pub func run_all() -> !:
     try expect_items(file, "    let w = Brush.make(1.0).", 8, 29, ["width", "area"], ["make"], "a call's result")
     try expect_items(file, "    let e = b", 8, 14, ["b"], ["area"], "a local in the open")
     try expect_items(file, "    let e = Br", 8, 15, ["Brush"], ["area"], "an imported type in the open")
+    # Generic results, as the checker types them: a method's, a function's, an element's.
+    try expect_items_in(file, open_script, "    var opened = tools.held(b)\n    opened.get().", 7, 18, ["width", "area"], ["make", "value"], "a generic method's result")
+    try expect_items_in(file, open_script, "    tools.held(b).", 6, 19, ["value", "get"], ["width"], "a generic function's result")
+    try expect_items_in(file, open_script, "    tools.held(b).value.", 6, 25, ["width", "area"], ["get"], "a generic result's field")
+    try expect_items_in(file, open_script, "    let all = [b, b]\n    all[1].", 7, 12, ["width", "area"], ["make"], "an indexed element")
+    try expect_items_in(file, open_script, "    var opened = tools.held(b)\n    (opened.get() catch failure: recover &opened.value).", 7, 57, ["width", "area"], ["make"], "a caught result")
     # Half-typed: the line above does not check; the last check that passed knows `b`.
     try expect_items(file, "    let x = (\n    b.", 9, 7, ["width", "area"], ["make"], "the last good check")
     var completion = try complete(file, "    b.", 8, 7)
