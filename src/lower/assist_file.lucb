@@ -197,7 +197,9 @@ func add_names(help: const FileHelp*, first: ast.Node*?, pruned: bool, prefix: s
 
 ## What the word at line `line`, column `column` (1-based, in bytes) of `text` is, the
 ## file at `path`: a declaration's signature then its doc, a local's `name: type`, an
-## import's module; nothing when the check does not say. Into `out`.
+## import's module. Where the checked tree holds no word, the parsed text answers: a
+## declaration's own name, an import or a helper the check pruned (`hover_parsed`).
+## Nothing when neither says. Into `out`.
 pub func hover_file(path: str, text: str, line: u32, column: u32, out: collections.List[u8]*) -> !:
     let place = Place.of(text, line, column) else return
     if place.in_comment_or_text(): return
@@ -213,7 +215,12 @@ pub func hover_file(path: str, text: str, line: u32, column: u32, out: collectio
     var help = made
     defer help.destroy()
     let source = result.checker.modules.get(help.file).src.bytes
-    let node = word_node(tree.body, source, place.offset) else return
+    let found = word_node(tree.body, source, place.offset)
+    if found == none:
+        # No typed word here: a declaration's own name, or a word of what the check pruned.
+        try hover_parsed(&help, (str)source, place.offset, out)
+        return
+    let node = found else return
     # A local's own declaration stands for itself.
     let declared = node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_ or node.kind == ast.Kind.param
     if node.resolved == none and not declared:
@@ -237,6 +244,99 @@ pub func hover_file(path: str, text: str, line: u32, column: u32, out: collectio
         _:
             let module = help.module_of(decl) else return
             try help.describe(decl, module, out)
+
+## Hover from the file's parsed text (`help.parsed`), for a word the checked tree does not
+## hold: the name of a declaration (a function's, a type's, a member's, kept or pruned),
+## an import the check pruned, or a word inside a top-level function the check pruned
+## (a helper nothing calls yet), resolved as completion resolves it: a chain through
+## `help.chain_target`, else a top-level name. A pruned function's own locals are untyped,
+## so they say nothing.
+func hover_parsed(help: const FileHelp*, source: str, offset: usize, out: collections.List[u8]*) -> !:
+    let parsed = help.parsed else return
+    let start = word_start(source, offset)
+    let end = word_end(source, offset)
+    if start == end or digit(source.bytes[start]): return
+    let word = (str)source.bytes[start..<end]
+    # The top-level declaration holding the word: the last starting before it (the parser
+    # records where a node starts, not where it ends).
+    let d = last_before(parsed.body, offset) else return
+    if d.kind == ast.Kind.import_ or d.kind == ast.Kind.from_import:
+        try hover_top_name(help, word, out)
+        return
+    if let named = declaration_named_at(d, source, start):
+        try help.describe(named, help.file, out)
+        return
+    # Inside a declaration the check kept, the checked tree answers or nothing does.
+    if d.kind != ast.Kind.func_ or help.name_in(help.tree.body, d.text) != none: return
+    if binds(d.right, word) or binds(d.body, word): return
+    if start > 0 and source.bytes[start - 1] == '.':
+        var chain = collections.List[Segment]()
+        defer chain.destroy()
+        if not try chain_before(source, start - 1, &chain): return
+        let owner = help.chain_target(chain.view(), none) else return
+        let (decl, module) = help.member(owner, word) else return
+        try help.describe(decl, module, out)
+        return
+    try hover_top_name(help, word, out)
+
+## The hover text of a top-level name: an imported module's, else its declaration's.
+func hover_top_name(help: const FileHelp*, word: str, out: collections.List[u8]*) -> !:
+    let (decl, module) = help.top_name(word) else return
+    if decl.kind == ast.Kind.module:
+        try append_text(out, "module ")
+        try append_text(out, word)
+        return
+    try help.describe(decl, module, out)
+
+## The declaration among `d` and its members (a type's fields and methods) whose name is
+## the word at byte `start` of `source`.
+func declaration_named_at(d: ast.Node*, source: str, start: usize) -> ast.Node*?:
+    if decl_kind(d) == none or d.text.length == 0: return none
+    if name_offset(d, source) == start: return d
+    if d.kind == ast.Kind.func_: return none
+    let m = last_before(d.body, start) else return none
+    return declaration_named_at(m, source, start)
+
+## The last node of the list at `first` starting at or before byte `offset`.
+func last_before(first: ast.Node*?, offset: usize) -> ast.Node*?:
+    var found: ast.Node*? = none
+    var cursor = first
+    while let node = cursor:
+        if node.start > offset: break
+        found = node
+        cursor = node.next
+    return found
+
+## Where a declaration's name is written: the first whole word on its first line spelling it.
+func name_offset(d: ast.Node*, source: str) -> usize?:
+    var at = d.start
+    while at + d.text.length <= source.length and source.bytes[at] != '\n':
+        let fits = (str)source.bytes[at..<at + d.text.length] == d.text
+        let before = at == 0 or not word_byte(source.bytes[at - 1])
+        let after = at + d.text.length == source.length or not word_byte(source.bytes[at + d.text.length])
+        if fits and before and after: return at
+        at += 1
+    return none
+
+## Whether a `let`, `var`, loop variable or parameter named `name` is declared in the list
+## at `first` or below it.
+func binds(first: ast.Node*?, name: str) -> bool:
+    var cursor = first
+    while let node = cursor:
+        cursor = node.next
+        let binding = node.kind == ast.Kind.let_ or node.kind == ast.Kind.var_ or node.kind == ast.Kind.param
+        if binding and node.text == name: return true
+        if binding and node.text.length == 0 and spells_name(node.body, name): return true
+        if binds(node.left, name) or binds(node.right, name) or binds(node.body, name): return true
+    return false
+
+## Whether a name node in the list at `first` spells `name` (`for (i, v) in`, `let (a, b)`).
+func spells_name(first: ast.Node*?, name: str) -> bool:
+    var cursor = first
+    while let node = cursor:
+        cursor = node.next
+        if node.kind == ast.Kind.name and node.text == name: return true
+    return false
 
 ## The name, member or declared local whose word holds byte `offset` of `source`, in the
 ## list at `first` and below it.

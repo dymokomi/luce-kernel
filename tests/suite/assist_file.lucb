@@ -88,6 +88,19 @@ pub func run_all() -> !:
         if item.label == "halve": described = item.kind == .function and item.detail == "halve(x: f32) -> f32" and item.doc == "Half of `x`."
     expect(described, "an unused helper's signature and doc")
     print("ok    file help: what the check pruned (an unused helper and imports)")
+    # Hover on what the check pruned, and on a declaration's own name.
+    let pruned = "from help_dep.tools import Brush\nfrom help_dep import tools\n\n## Half of `x`.\nfunc halve(x: f32) -> f32:\n    return x / 2.0\n\npub func run(scale: f32) -> f32:\n    return scale\n\nfunc twice(w: f32) -> f32:\n    let b = Brush.make(w)\n    return tools.double(b.width)\n"
+    try expect_hover(file, pruned, 5, 7, "halve(x: f32) -> f32\nHalf of `x`.", "hovering an unused helper's name")
+    try expect_hover(file, pruned, 8, 11, "run(scale: f32) -> f32", "hovering a kept function's name")
+    try expect_hover(file, pruned, 1, 30, "struct Brush\nA brush for painting.", "hovering an unused imported type")
+    try expect_hover(file, pruned, 2, 24, "module tools", "hovering an unused imported module")
+    try expect_hover(file, pruned, 12, 14, "struct Brush\nA brush for painting.", "hovering a type in an unused helper")
+    try expect_hover(file, pruned, 12, 20, "make(width: f32) -> Brush\nA brush `width` wide.", "hovering a static function in an unused helper")
+    try expect_hover(file, pruned, 13, 19, "double(x: f32) -> f32\nTwice `x`.", "hovering a module's function in an unused helper")
+    try expect_hover(file, pruned, 6, 12, "", "an unused helper's parameter says nothing")
+    try expect_hover(file, pruned, 13, 26, "", "an unused helper's local says nothing")
+    try expect_hover(file, script, 4, 11, "run(scale: f32) -> f32", "hovering a declaration's name in a clean check")
+    print("ok    file help: hover on what the check pruned")
 
 ## The script with `extra` after its last line, completed at `line`, `column`.
 func complete(file: str, extra: str, line: u32, column: u32) -> lower.Completion!:

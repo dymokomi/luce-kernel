@@ -31,7 +31,7 @@ struct FileHelp:
     var locals: collections.List[FileLocal]
     ## The file's top level as its text parses, untyped: the checked tree has lost what the
     ## checker pruned (§19.6), a helper nothing calls yet or an import nothing uses yet,
-    ## which completion still lists. None when the text does not parse; its nodes live in
+    ## which completion and hover still know. None when the text does not parse; its nodes live in
     ## `parsing`.
     var parsed: ast.Node*? = none
     var parsing: memory.Arena? = none
